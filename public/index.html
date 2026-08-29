@@ -1,0 +1,448 @@
+<!doctype html><html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>淘星TV</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📺</text></svg>">
+<style>
+  :root{--bg:#0d0f14;--panel:#151922;--panel2:#1b2130;--line:#232a3a;--txt:#e6e9ef;--dim:#8a93a6;--acc:#3b82f6;--acc2:#2563eb}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;height:100vh;overflow:hidden}
+  .app{display:grid;grid-template-columns:340px 1fr;height:100vh;transition:grid-template-columns .22s ease}
+  .app.collapsed{grid-template-columns:0 1fr}
+  .side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .tabs{display:flex;border-bottom:1px solid var(--line)}
+  .tabs button{flex:1;padding:15px 0;background:none;border:none;color:var(--dim);font-size:15px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent}
+  .tabs button.on{color:var(--txt);border-bottom-color:var(--acc)}
+  .search{padding:12px}
+  .search input{width:100%;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);outline:none}
+  .search input:focus{border-color:var(--acc)}
+  .cats{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px 4px}
+  .cats button{padding:5px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:16px;color:var(--dim);font-size:13px;cursor:pointer}
+  .cats button.on{background:var(--acc2);color:#fff;border-color:var(--acc2)}
+  .list{flex:1;overflow-y:auto;padding:0 8px 12px}
+  #liveBox,#vodBox{flex:1;display:flex;flex-direction:column;min-height:0}
+  .row{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:8px;cursor:pointer}
+  .row:hover{background:var(--panel2)}
+  .row.on{background:var(--acc2)}
+  .row .idx{width:30px;color:var(--dim);font-variant-numeric:tabular-nums;font-size:12px;flex:none;text-align:center}
+  .row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .rk{color:var(--dim);font-size:12px;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row.on .rk,.row.on .idx{color:#cfe0ff}
+  .thumb{width:38px;height:52px;flex:none;border-radius:4px;object-fit:cover;background:var(--panel2)}
+  .logo{width:44px;height:34px;flex:none;object-fit:contain;background:#0a0c10;border-radius:4px}
+  .thumb.noimg,.logo.noimg{visibility:hidden}
+  .muted{padding:20px;color:var(--dim)}
+  .main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:#000;position:relative}
+  .sideToggle{position:absolute;left:0;top:50%;transform:translateY(-50%);z-index:5;width:20px;height:64px;background:rgba(0,0,0,.45);color:#fff;border:none;border-radius:0 9px 9px 0;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;opacity:.28;transition:opacity .2s,background .2s}
+  .sideToggle:hover{opacity:.95;background:rgba(0,0,0,.72)}
+  .stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden}
+  video{width:100%;height:100%;background:#000;object-fit:contain}
+  .hint{position:absolute;color:var(--dim);font-size:15px;text-align:center;pointer-events:none}
+  .load{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:rgba(0,0,0,.55);pointer-events:none;z-index:3}
+  .load.show{display:flex}
+  .spin{width:44px;height:44px;border:3px solid #2a3346;border-top-color:var(--acc);border-radius:50%;animation:s 1s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .ptitle{position:absolute;top:0;left:0;right:0;padding:16px 20px;font-size:16px;font-weight:600;color:#fff;background:linear-gradient(180deg,rgba(0,0,0,.6),transparent);opacity:0;transition:opacity .2s;pointer-events:none;z-index:4}
+  .stage.ui .ptitle{opacity:1}
+  .pctl{position:absolute;left:0;right:0;bottom:0;padding:26px 18px 14px;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent);display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .2s;z-index:4}
+  .stage.ui .pctl{opacity:1}
+  .pbtn{height:40px;min-width:40px;padding:0 8px;border:none;background:transparent;color:#fff;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:8px;white-space:nowrap}
+  .pbtn:hover{background:rgba(255,255,255,.15)}
+  .pbtn.txt{font-size:14px}
+  .pbtn.on{color:var(--acc);background:rgba(59,130,246,.18)}
+  .moreWrap{position:relative;flex:none}
+  .moreMenu{position:absolute;right:0;bottom:50px;background:#1b2130;border:1px solid var(--line);border-radius:10px;padding:6px;min-width:158px;display:none;box-shadow:0 8px 28px rgba(0,0,0,.55)}
+  .moreMenu.show{display:block}
+  .mitem{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:7px;cursor:pointer;color:var(--txt);font-size:14px;white-space:nowrap}
+  .mitem:hover{background:var(--panel2)}
+  .mitem .chk{width:15px;color:var(--acc);visibility:hidden;font-weight:700}
+  .mitem.on .chk{visibility:visible}
+  .pbtn:disabled{color:#5a6273;cursor:default}
+  .pbtn:disabled:hover{background:transparent}
+  .tm{color:#e8ebf2;font-size:14px;font-variant-numeric:tabular-nums;flex:none;min-width:56px;text-align:center}
+  .seek{flex:1;min-width:80px;-webkit-appearance:none;height:6px;border-radius:3px;background:rgba(255,255,255,.28);outline:none;cursor:pointer}
+  .seek::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#fff;cursor:pointer;box-shadow:0 0 0 3px rgba(59,130,246,.45)}
+  .volsl{width:88px;-webkit-appearance:none;height:5px;border-radius:3px;background:rgba(255,255,255,.28);outline:none;cursor:pointer}
+  .volsl::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:#fff;cursor:pointer}
+  .liveInd{color:#ff5a5a;font-size:14px;font-weight:600;flex:none}
+  #speed{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:7px 10px;font-size:14px;cursor:pointer;flex:none}
+  .vodOnly,.liveOnly{display:none}
+  .stage.vod .vodOnly{display:flex}
+  .stage.live .liveOnly{display:flex}
+  select.vodOnly{display:none}.stage.vod select.vodOnly{display:inline-block}
+  .volpop{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.7);color:#fff;padding:10px 18px;border-radius:10px;font-size:20px;font-weight:600;opacity:0;transition:opacity .25s;pointer-events:none;z-index:6}
+  .volpop.show{opacity:1}
+  .detail{position:absolute;inset:0;background:rgba(13,15,20,.97);z-index:8;display:none;padding:28px 34px;overflow-y:auto}
+  .detail.show{display:block}
+  .detail .head{display:flex;gap:22px;margin-bottom:20px}
+  .detail .poster{width:150px;height:210px;flex:none;border-radius:10px;background:var(--panel2) center/cover no-repeat;box-shadow:0 4px 18px rgba(0,0,0,.4)}
+  .detail h2{font-size:24px;margin-bottom:8px}
+  .detail .meta{color:var(--dim);font-size:13px;margin-bottom:12px;line-height:1.9}
+  .detail .desc{color:#c3cad8;font-size:13px;line-height:1.7;max-width:820px}
+  .detail .epstitle{color:var(--dim);font-size:13px;margin:6px 0 10px}
+  .detail .eps{display:grid;gap:8px}
+  .detail .eps button{padding:9px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);cursor:pointer;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .detail .eps button:hover{border-color:var(--acc);background:#243049}
+  .detail .close{position:absolute;top:18px;right:22px;background:none;border:none;color:var(--dim);font-size:26px;cursor:pointer;z-index:9}
+  #wake{position:fixed;inset:0;z-index:99;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
+  #wake.hide{display:none}
+  #wake .logo2{font-size:34px;font-weight:800}#wake .step{color:var(--dim);font-size:14px}
+  #wake .prog{width:260px;height:4px;background:var(--panel2);border-radius:2px;overflow:hidden}
+  #wake .prog i{display:block;height:100%;width:30%;background:var(--acc);border-radius:2px;animation:sl 1.2s ease-in-out infinite}
+  #wakeProg{display:flex;flex-direction:column;align-items:center;gap:16px}
+  #loginBox{display:flex;flex-direction:column;gap:12px;width:290px}
+  #loginBox .lt{font-size:15px;color:var(--txt);text-align:center;margin-bottom:2px}
+  #loginBox input{padding:12px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);font-size:15px}
+  #loginBox input:focus{border-color:var(--acc);outline:none}
+  #loginBox button{padding:12px;background:var(--acc);color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
+  #loginBox button:disabled{opacity:.55;cursor:default}
+  #liErr{color:#ff6b6b;font-size:13px;min-height:16px;text-align:center}
+  @keyframes sl{0%{margin-left:-30%}100%{margin-left:100%}}
+</style></head><body>
+<div id="wake"><div class="logo2">📺 淘星TV</div>
+  <div id="wakeProg"><div class="prog"><i></i></div><div class="step" id="wstep">正在唤醒…</div></div>
+  <div id="loginBox" style="display:none">
+    <div class="lt">登录淘星TV账号</div>
+    <input id="liAccount" placeholder="账号" autocomplete="username">
+    <input id="liPassword" type="password" placeholder="密码" autocomplete="current-password">
+    <button id="liBtn" onclick="doLogin()">登录</button>
+    <div id="liErr"></div>
+  </div>
+</div>
+<div class="app">
+  <aside class="side">
+    <div class="tabs"><button id="tabLive" class="on" onclick="switchTab('live')">直播</button><button id="tabVod" onclick="switchTab('vod')">点播</button></div>
+    <div id="liveBox"><div class="search"><input id="q" placeholder="搜索频道…"></div><div class="list" id="listLive"></div></div>
+    <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名(中文)… 如 黄石"></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
+  </aside>
+  <section class="main">
+    <button class="sideToggle" id="sideTgl" onclick="toggleSide()" title="收起/展开节目栏">‹</button>
+    <div class="stage" id="stage">
+      <video id="v" playsinline></video>
+      <div class="hint" id="hint">← 从左侧选一个频道开始观看</div>
+      <div class="ptitle" id="ptitle"></div>
+      <div class="volpop" id="volpop"></div>
+      <div class="load" id="load"><div class="spin"></div><div id="loadtx">正在连接…</div></div>
+      <div class="pctl" id="pctl">
+        <button class="pbtn" id="ppBtn" title="播放/暂停(空格)">▶</button>
+        <button class="pbtn txt vodOnly" id="prevBtn" title="上一集">⏮</button>
+        <button class="pbtn txt vodOnly" id="nextBtn" title="下一集">⏭</button>
+        <span class="tm vodOnly" id="curT">0:00</span>
+        <input type="range" class="seek vodOnly" id="seek" min="0" max="1000" value="0">
+        <span class="tm vodOnly" id="totT">0:00</span>
+        <span class="liveInd liveOnly" id="liveInd">● 直播中</span>
+        <span style="flex:1" class="liveOnly"></span>
+        <button class="pbtn" id="volBtn" title="静音">🔊</button>
+        <input type="range" class="volsl" id="vol" min="0" max="1" step="0.05" value="1">
+        <select id="speed" class="vodOnly"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+        <button class="pbtn txt vodOnly" id="epsBtn" title="选集" onclick="reopenEps()">选集</button>
+        <div class="moreWrap"><button class="pbtn" id="moreBtn" title="更多">⋯</button>
+          <div class="moreMenu" id="moreMenu">
+            <div class="mitem on" id="mDialog" onclick="toggleDialog()"><span class="chk">✓</span><span>人声增强</span></div>
+          </div>
+        </div>
+        <button class="pbtn" id="fsBtn" title="全屏(双击画面)">⛶</button>
+      </div>
+      <div class="detail" id="detail"><button class="close" onclick="closeDetail()">✕</button>
+        <div class="head"><div class="poster" id="dPoster"></div><div style="flex:1">
+          <h2 id="dTitle"></h2><div class="meta" id="dMeta"></div><div class="desc" id="dDesc"></div></div></div>
+        <div class="epstitle">选集播放</div><div class="eps" id="dEps"></div>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="/mpegts.js"></script>
+<script>
+let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0;
+let curFilm=null, curEps=[], curEpIdx=0, vodBase=0, vodDur=0, dragging=false, curSpeed=1, isLiveNow=false, curPct=0, switching=false;
+const $=id=>document.getElementById(id);
+const jget=async(u,o)=>{ const r=await fetch(u,o); if(!r.ok){ let m=''; try{m=(await r.json()).error||'';}catch(e){} throw new Error('HTTP '+r.status+(m?': '+m:'')); } return r.json(); };
+const V=$('v'), STAGE=$('stage');
+const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
+const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+
+async function boot(){ try{
+  let st=await jget('/api/status');
+  if(st.state!=='ready'){ await fetch('/api/wake',{method:'POST'});
+    let ok=false;
+    for(let i=0;i<90;i++){ await new Promise(r=>setTimeout(r,1200)); try{st=await jget('/api/status');}catch(e){continue;}
+      $('wstep').textContent=st.step||'正在唤醒引擎…';
+      if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')){$('wstep').textContent=st.step;return;} }
+    if(!ok){ $('wstep').textContent='唤醒超时，请刷新重试'; return; } }
+  $('wstep').textContent='检查登录…';
+  let ls; try{ ls=await jget('/api/loginstate'); }catch(e){ ls={loggedIn:false,hasSavedCreds:false}; }
+  if(!ls.loggedIn){
+    if(ls.hasSavedCreds){ $('wstep').textContent='自动登录中…'; const r=await loginRequest({useSaved:true}); if(!r.ok){ showLogin(r.error||'自动登录失败，请重新登录'); return; } }
+    else { showLogin(''); return; }
+  }
+  await afterLogin();
+  }catch(e){ $('wstep').textContent='连接失败: '+(e.message||e)+'（请刷新）'; }
+}
+async function afterLogin(){
+  const d=await jget('/api/channels');
+  if(d.error){$('wstep').textContent='引擎未就位: '+d.error;return;}
+  channels=d.live||[]; window.expiredTime=d.expiredTime||'';
+  $('wake').classList.add('hide'); startHeartbeat(); restore();
+}
+function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; }
+async function loginRequest(body){
+  try{ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return await r.json(); }
+  catch(e){ return {ok:false,error:'网络错误'}; }
+}
+async function doLogin(){
+  const account=$('liAccount').value.trim(), password=$('liPassword').value.trim();
+  if(!account||!password){ $('liErr').textContent='请输入账号和密码'; return; }
+  $('liBtn').disabled=true; $('liBtn').textContent='登录中…（约10-20秒）'; $('liErr').textContent='';
+  const r=await loginRequest({account,password});
+  if(r.ok){ $('loginBox').style.display='none'; $('wakeProg').style.display=''; $('wstep').textContent='登录成功，加载中…'; await afterLogin(); }
+  else { $('liErr').textContent=r.error||'登录失败'; $('liBtn').disabled=false; $('liBtn').textContent='登录'; }
+}
+['liAccount','liPassword'].forEach(id=>{ const el=$(id); if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); }); });
+// —— 状态持久化 ——
+function saveState(){ const s={tab:mode};
+  if(curFilm){ s.vod={film:curFilm,eps:curEps,idx:curEpIdx,dur:vodDur,percent: vodDur?((vodBase+V.currentTime)/vodDur*100):0}; }
+  else if(curId&&isLiveNow){ const c=channels.find(x=>x.channelId===curId); if(c)s.live={id:c.channelId,link:c.link,name:c.name,index:c.index}; }
+  LS.set('txtv_state',s); }
+async function restore(){ const s=LS.get('txtv_state',null);
+  if(!s){ renderChannels(channels); return; }
+  if(s.vod&&s.vod.film){ switchTab('vod'); curFilm=s.vod.film; curEps=s.vod.eps||[]; curEpIdx=s.vod.idx||0; vodDur=s.vod.dur||0;
+    if(curEps[curEpIdx]) playEpisode(Math.max(0,Math.min(99,Math.floor((s.vod.percent||0))))); }
+  else if(s.live&&s.live.id){ switchTab('live'); playLive({channelId:s.live.id,link:s.live.link,name:s.live.name,index:s.live.index}); }
+  else { switchTab(s.tab||'live'); }
+}
+// —— 最近播放 ——
+function pushRecent(item){ let r=LS.get('txtv_recent',[]); r=r.filter(x=>x.key!==item.key); r.unshift(item); r=r.slice(0,24); LS.set('txtv_recent',r); }
+function getRecent(){ return LS.get('txtv_recent',[]); }
+function switchTab(m){ mode=m; closeDetail(); saveState();
+  $('tabLive').classList.toggle('on',m==='live'); $('tabVod').classList.toggle('on',m==='vod');
+  $('liveBox').style.display=m==='live'?'':'none'; $('vodBox').style.display=m==='vod'?'':'none';
+  // 各tab独立列表:只在首次(列表还空)加载;之后切换只切显隐,完整保留内容与滚动位置。清空搜索框才回默认分类。
+  if(m==='live'){ if(!$('listLive').children.length) renderChannels(channels); }
+  else { if(!cats.length) loadCats(); }
+}
+// 直播
+function renderChannels(arr){ const L=$('listLive'); L.innerHTML='';
+  arr.forEach(c=>{ const d=document.createElement('div'); d.className='row'+(c.channelId===curId?' on':'');
+    const lg=c.link?`<img class="logo" loading="lazy" src="/logo?link=${encodeURIComponent(c.link)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="logo noimg"></span>';
+    d.innerHTML=`<span class="idx">${c.index||''}</span>${lg}<span class="nm">${c.name||'—'}</span>`;
+    d.onclick=()=>playLive(c); d.dataset.id=c.channelId; L.appendChild(d); }); }
+$('q').oninput=e=>{const k=e.target.value.trim().toLowerCase(); renderChannels(k?channels.filter(c=>(c.name||'').toLowerCase().includes(k)):channels);};
+function playLive(c){ curId=c.channelId; curFilm=null; curEps=[]; mark(c.channelId); closeDetail();
+  startPlay(c.name,'/stream/'+encodeURIComponent(c.channelId),true);
+  pushRecent({key:'live:'+c.channelId,type:'live',channelId:c.channelId,link:c.link,name:c.name,index:c.index}); saveState(); }
+// 点播
+async function loadCats(){ const my=++reqSeq; const d=await jget('/api/vod/categories'); if(my!==reqSeq&&cats.length)return; cats=d.categories||[];
+  const C=$('cats'); C.innerHTML='';
+  const rec=document.createElement('button'); rec.textContent='最近播放'; rec.onclick=()=>{document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));rec.classList.add('on');showRecent();}; C.appendChild(rec);
+  cats.forEach((c)=>{ const b=document.createElement('button'); b.textContent=c.type;
+    b.onclick=()=>{document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));b.classList.add('on');loadFilms(c.link);}; C.appendChild(b); });
+  if(my===reqSeq && !$('vq').value.trim()){ const first=C.querySelectorAll('button')[1]; if(first){first.classList.add('on');loadFilms(cats[0].link);} } }
+function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML='';
+  if(!r.length){ L.innerHTML='<div class="muted">还没有播放记录</div>'; return; }
+  r.forEach(it=>{ const el=document.createElement('div'); el.className='row';
+    if(it.type==='live'){ const lg=`<img class="logo" src="/logo?link=${encodeURIComponent(it.link||'')}&v=3" onerror="this.classList.add('noimg')">`;
+      el.innerHTML=`${lg}<span class="nm">${it.name}</span><span class="rk">直播</span>`; el.onclick=()=>{switchTab('live');playLive(it);}; }
+    else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
+      el.innerHTML=`${pic}<span class="nm">${it.title||it.film.title}</span><span class="rk">${it.epname||''}</span>`; el.onclick=()=>openDetail(it.film); }
+    L.appendChild(el); }); }
+async function loadFilms(path){ const my=++reqSeq; $('listVod').innerHTML='<div class="muted">加载中…</div>';
+  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }catch(e){ if(my===reqSeq)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
+  if(my!==reqSeq)return; films=d.films||[]; renderFilms(); }
+let vqTimer=null;
+$('vq').addEventListener('input',e=>{ const q=e.target.value.trim(); clearTimeout(vqTimer);
+  if(!q){ const chips=document.querySelectorAll('#cats button'); if(chips[1])chips[1].click(); return; }
+  vqTimer=setTimeout(()=>searchVod(q),350); });
+async function searchVod(q){ const my=++reqSeq;
+  document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));
+  $('listVod').innerHTML='<div class="muted">搜索中…</div>';
+  let d; try{ d=await jget('/api/search?q='+encodeURIComponent(q)); }catch(e){ if(my===reqSeq)$('listVod').innerHTML='<div class="muted">搜索失败</div>'; return; }
+  if(my!==reqSeq)return;
+  if(d.error){ $('listVod').innerHTML='<div class="muted">搜索失败: '+d.error+'</div>'; return; }
+  films=d.films||[]; if(!films.length){ $('listVod').innerHTML='<div class="muted">没找到"'+q+'"相关节目</div>'; return; }
+  renderFilms('搜到 '+d.count+' 部（首字母 '+d.initials+'）'); }
+function renderFilms(head){ const L=$('listVod'); L.innerHTML='';
+  if(head){ const h=document.createElement('div'); h.className='muted'; h.style.cssText='padding:8px 11px;font-size:12px'; h.textContent=head; L.appendChild(h); }
+  films.forEach(f=>{ const el=document.createElement('div'); el.className='row';
+    const pic=f.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
+    el.innerHTML=`${pic}<span class="nm">${f.title}</span><span class="rk">${f.remark||''}</span>`; el.onclick=()=>openDetail(f); L.appendChild(el); }); }
+let lastDetail=null;
+async function openDetail(f){ const my=++reqSeq; $('detail').classList.add('show'); $('dTitle').textContent=f.title;
+  $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dPoster').style.backgroundImage='';
+  let d; try{ d=await jget('/api/vod/detail?playid='+encodeURIComponent(f.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
+  if(my!==reqSeq)return;
+  if(d.error){$('dMeta').textContent='加载失败: '+d.error;return;}
+  lastDetail={f,d}; renderDetail(); }
+function renderDetail(){ if(!lastDetail)return; const {f,d}=lastDetail; const m=d.film;
+  $('detail').classList.add('show'); $('dTitle').textContent=f.title;
+  $('dPoster').style.backgroundImage=f.pic?`url(/poster?pic=${encodeURIComponent(f.pic)}&v=3)`:'';
+  $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
+  $('dDesc').textContent=m.content||''; const E=$('dEps'); E.innerHTML='';
+  const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
+  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+Math.min(220,Math.max(56,maxLen*15+22))+'px,1fr))';
+  eps.forEach((ep,i)=>{ const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
+    if(curFilm&&curFilm.playid===f.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
+    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(0); }; E.appendChild(b); }); }
+function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
+function closeDetail(){ $('detail').classList.remove('show'); }
+// —— 点播播放(按 percent 取流)+ 上/下集 ——
+function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
+  vodBase=vodDur?Math.floor(percent/100*vodDur):0; curPct=percent;
+  const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
+  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}`;
+  startPlay(title,url,false); updEpBtns();
+  pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm}); saveState(); }
+function playVodAt(percent){ playEpisode(percent); }
+function updEpBtns(){ $('prevBtn').disabled=curEpIdx<=0; $('nextBtn').disabled=curEpIdx>=curEps.length-1; }
+$('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(0);} };
+$('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(0);} };
+// 通用播放
+function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
+function toggleSide(){ const app=document.querySelector('.app'); const c=app.classList.toggle('collapsed'); $('sideTgl').textContent=c?'›':'‹'; try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} }
+try{ if(localStorage.getItem('txtv_side')==='1'){ document.querySelector('.app').classList.add('collapsed'); $('sideTgl').textContent='›'; } }catch(e){}
+function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+  $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
+  STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
+  if(player){try{player.destroy()}catch(e){}player=null;}
+  // 直播和点播都是"连续流"(点播靠 percent 重启来跳转),统一用 isLive:true 避免 VOD 模式的 range 请求/缓冲上限关连接
+  player=mpegts.createPlayer({type:'mpegts',isLive:true,url:url},
+    {enableWorker:false, liveBufferLatencyChasing:isLive, liveBufferLatencyMaxLatency:isLive?5.0:30.0, liveBufferLatencyMinRemain:isLive?1.0:5.0, lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
+  player.attachMediaElement(V); player.load();
+  V.oncanplay=()=>{$('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
+    if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
+  player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b); });
+  V.play().catch(()=>{}); flashUI();
+}
+// —— 控件显隐 ——
+let uiTimer=null;
+function flashUI(){ if(!player)return; STAGE.classList.add('ui'); clearTimeout(uiTimer); uiTimer=setTimeout(()=>{ if(!V.paused)STAGE.classList.remove('ui'); },2600); }
+STAGE.addEventListener('mousemove',flashUI);
+$('pctl').addEventListener('mousemove',e=>e.stopPropagation());
+V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui'); });
+// —— 单击暂停 / 双击全屏 ——
+let clickTimer=null;
+STAGE.addEventListener('click',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.ptitle'))return;
+  if(clickTimer){clearTimeout(clickTimer);clickTimer=null;return;}
+  clickTimer=setTimeout(()=>{ clickTimer=null; if(player) togglePP(); },230); });
+STAGE.addEventListener('dblclick',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail'))return; toggleFS(); });
+// —— 控件 ——
+function togglePP(){ if(!player)return; if(V.paused)V.play(); else V.pause(); }
+$('ppBtn').onclick=togglePP;
+V.addEventListener('play',()=>{$('ppBtn').textContent='⏸';});
+V.addEventListener('pause',()=>{$('ppBtn').textContent='▶';});
+$('speed').onchange=e=>{ curSpeed=parseFloat(e.target.value); V.playbackRate=curSpeed; };
+$('fsBtn').onclick=toggleFS;
+function toggleFS(){ if(document.fullscreenElement){document.exitFullscreen();} else {STAGE.requestFullscreen&&STAGE.requestFullscreen();} }
+document.addEventListener('fullscreenchange',()=>{ $('fsBtn').textContent=document.fullscreenElement?'🗗':'⛶'; });
+$('vol').addEventListener('input',e=>{ V.volume=parseFloat(e.target.value); V.muted=V.volume===0; updVolIcon(); });
+$('volBtn').onclick=()=>{ V.muted=!V.muted; $('vol').value=V.muted?0:V.volume; updVolIcon(); };
+function updVolIcon(){ $('volBtn').textContent=(V.muted||V.volume===0)?'🔇':(V.volume<0.5?'🔉':'🔊'); }
+function setVol(delta){ V.muted=false; V.volume=Math.max(0,Math.min(1,+(V.volume+delta).toFixed(2))); $('vol').value=V.volume; updVolIcon();
+  const p=$('volpop'); p.textContent='🔊 '+Math.round(V.volume*100)+'%'; p.classList.add('show'); clearTimeout(p._t); p._t=setTimeout(()=>p.classList.remove('show'),700); }
+let saveTimer=null;
+function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
+  const cur=dragging?parseFloat($('seek').value||0):(vodBase+V.currentTime);
+  const played=Math.max(0,Math.min(100,cur/dur*100));
+  let buf=played; if(V.buffered&&V.buffered.length){ buf=Math.max(played,Math.min(100,(vodBase+V.buffered.end(V.buffered.length-1))/dur*100)); }
+  // 蓝=已播放 / 白=已缓冲未播 / 灰=未缓冲
+  $('seek').style.background='linear-gradient(to right, var(--acc) 0 '+played+'%, rgba(255,255,255,.9) '+played+'% '+buf+'%, rgba(255,255,255,.28) '+buf+'% 100%)'; }
+V.addEventListener('progress',updateSeekBar);
+V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
+  clearTimeout(saveTimer); saveTimer=setTimeout(saveState,3000); } });
+$('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
+$('seek').addEventListener('change',()=>{ dragging=false; commitSeek(parseFloat($('seek').value)); });
+function commitSeek(absSec){ if(!curFilm||!vodDur)return; absSec=Math.max(0,Math.min(vodDur-1,absSec));
+  const bufEnd=V.buffered.length?vodBase+V.buffered.end(V.buffered.length-1):vodBase;
+  if(absSec>=vodBase && absSec<=bufEnd){ V.currentTime=absSec-vodBase; saveState(); return; }  // 缓冲内:精确无缝
+  // 缓冲外:整数百分点重取。前进时保证新起点严格晚于当前位置,绝不后退(整数粒度下宁可多进一点也不倒退)
+  const curAbs=vodBase+V.currentTime; let pct=Math.round(absSec/vodDur*100);
+  if(absSec>curAbs){ while(pct/100*vodDur<=curAbs+1 && pct<96) pct++; }
+  playEpisode(Math.max(0,Math.min(96,pct))); saveState(); }
+let seekTarget=null, seekTimer=null;
+function seekBy(delta){ if(isLiveNow||!curFilm||!vodDur)return; flashUI();
+  const base=(seekTarget!=null)?seekTarget:(vodBase+V.currentTime);
+  seekTarget=Math.max(0,Math.min(vodDur-1,base+delta));
+  dragging=true; $('seek').value=seekTarget; $('curT').textContent=fmt(seekTarget); updateSeekBar();  // 立即视觉反馈,先不取流
+  clearTimeout(seekTimer); seekTimer=setTimeout(()=>{ const t=seekTarget; seekTarget=null; dragging=false; commitSeek(t); },280); }
+// —— 键盘 ——
+document.addEventListener('keydown',e=>{
+  const t=document.activeElement; if(t&&(t.tagName==='INPUT'||t.tagName==='SELECT'||t.tagName==='TEXTAREA'))return;
+  if(e.code==='Escape'){
+    if($('detail').classList.contains('show')){ closeDetail(); e.preventDefault(); return; }   // ESC 关选集,等同点✕
+    if($('moreMenu').classList.contains('show')){ $('moreMenu').classList.remove('show'); e.preventDefault(); return; }
+  }
+  if(!player)return;
+  if(e.code==='Space'){ e.preventDefault(); togglePP(); flashUI(); }
+  else if(e.code==='ArrowLeft'){ e.preventDefault(); seekBy(-15); }
+  else if(e.code==='ArrowRight'){ e.preventDefault(); seekBy(15); }
+  else if(e.code==='ArrowUp'){ e.preventDefault(); setVol(0.05); }
+  else if(e.code==='ArrowDown'){ e.preventDefault(); setVol(-0.05); }
+  else if(e.code==='KeyF'){ toggleFS(); }
+});
+
+// —— 恢复策略(对齐原生App):临时卡顿不重取,让它自己缓冲恢复;
+//    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
+let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null;
+function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
+function doRecover(){   // 仅用于真断流/解码错误:从当前位置重取(带上限防死循环)
+  if(recovering||!player) return;
+  const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
+  if(recoverTimes>5){ $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
+  recovering=true; $('load').classList.add('show'); $('loadtx').textContent='恢复中…';
+  const pos = isLiveNow ? 0 : (vodBase + V.currentTime);
+  recoverTimer=setTimeout(()=>{ recoverTimer=null; try{
+    if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
+    else if(curFilm){ playEpisode(vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0); }
+  }catch(e){} recovering=false; }, 600);
+}
+V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
+// 卡顿看门狗:进度冻结且无数据(readyState<3)约12秒 -> 查 streamstate 决定怎么办
+let wdLast=0, wdStall=0, checking=false;
+setInterval(async ()=>{
+  if(!player||V.paused||recovering){ wdStall=0; wdLast=V.currentTime; return; }
+  const frozen = Math.abs(V.currentTime-wdLast)<0.1; wdLast=V.currentTime;
+  if(frozen && V.readyState<3){ wdStall++; } else { wdStall=0; }
+  if(wdStall>=4 && !checking){ wdStall=0; checking=true;
+    // 结束判定:tell==2 在旁路原生播放器时不触发,故主要靠"ffmpeg已退出(!alive)+接近片尾"。
+    const absPos = vodBase + V.currentTime;
+    const nearEnd = curFilm && vodDur && absPos >= vodDur*0.90;   // 内容常在标称时长前1~2%结束,末10%都算片尾区
+    const atEnd=()=>{ if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(0); } else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } };
+    try{ const st=await jget('/api/streamstate');
+      if(st.ended && curFilm){ atEnd(); }                 // 原生 tell==2(若触发)
+      else if(!st.alive){                                 // ffmpeg 已退出 = 流真的断了
+        if(nearEnd && curFilm) atEnd();                   //   片尾附近 = 正常放完 → 下一集/播放结束
+        else doRecover();                                 //   中途断流 = 从当前位置重取
+      }
+      // alive 且未结束 = 临时卡顿(哪怕在片尾附近)= 不动,等缓冲自愈
+    }catch(e){} checking=false;
+  }
+}, 3000);
+V.addEventListener('waiting', ()=>{ if(player&&!recovering){ $('loadtx').textContent='缓冲中…'; $('load').classList.add('show'); } });
+V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); recoverTimes=0; wdStall=0; });
+
+// —— 人声增强(Web Audio 动态范围压缩) ——
+let audioCtx=null, srcNode=null, compNode=null, gainNode=null, audioReady=false;
+let dialogMode = LS.get('txtv_dialog', true); // 默认开启,只做选择性关闭
+function setupAudio(){ if(audioCtx)return true;
+  try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    srcNode=audioCtx.createMediaElementSource(V); compNode=audioCtx.createDynamicsCompressor(); gainNode=audioCtx.createGain();
+    routeAudio(); return true; }catch(e){ console.warn('audio setup fail',e); return false; } }
+function routeAudio(){ if(!audioCtx)return;
+  try{ srcNode.disconnect(); compNode.disconnect(); gainNode.disconnect(); }catch(e){}
+  if(dialogMode){ compNode.threshold.value=-45; compNode.knee.value=30; compNode.ratio.value=12; compNode.attack.value=0.003; compNode.release.value=0.25; gainNode.gain.value=1.7;
+    srcNode.connect(compNode); compNode.connect(gainNode); gainNode.connect(audioCtx.destination); }
+  else { srcNode.connect(audioCtx.destination); } }
+// 首次用户交互时初始化音频(浏览器策略要求手势),默认按 dialogMode 生效
+function initAudioOnce(){ if(audioReady)return; audioReady=true; setupAudio(); if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume(); }
+document.addEventListener('click', initAudioOnce, {once:true, capture:true});
+document.addEventListener('keydown', initAudioOnce, {once:true, capture:true});
+function toggleDialog(){ if(!setupAudio())return; if(audioCtx.state==='suspended')audioCtx.resume(); dialogMode=!dialogMode; routeAudio(); LS.set('txtv_dialog',dialogMode); $('mDialog').classList.toggle('on',dialogMode); }
+$('moreBtn').onclick=(e)=>{ e.stopPropagation(); $('mDialog').classList.toggle('on',dialogMode); $('moreMenu').classList.toggle('show'); };
+$('moreMenu').addEventListener('click',e=>e.stopPropagation());
+document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
+
+function startHeartbeat(){ setInterval(()=>{ if(!document.hidden && player) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }
+// 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
+setInterval(()=>{ if(player && !isLiveNow && curFilm && !V.paused){ const a=V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0; fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{}); } }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
+window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('/api/leave'); });
+boot();
+</script>
+</body></html>

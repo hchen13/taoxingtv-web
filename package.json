@@ -1,0 +1,31 @@
+{
+  "name": "txtv",
+  "version": "1.0.0",
+  "description": "淘星TV 浏览器版 —— 把小米电视IPTV/点播APK跑成自定义网页播放器(后台无头模拟器+Frida+ffmpeg+mpegts.js)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "iptv",
+    "vod",
+    "frida",
+    "android-emulator",
+    "mpegts",
+    "ffmpeg",
+    "淘星TV"
+  ],
+  "author": "hchen13",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.11.1",
+    "frida": "^17.17.0",
+    "frida-compile": "^19.0.5",
+    "frida-java-bridge": "^7.0.13",
+    "frida-load": "^1.0.0",
+    "mpegts.js": "^1.8.2",
+    "pinyin-pro": "^3.29.3"
+  }
+}

@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# 第三方二进制(自行从 frida releases 下载对应 arm64 版本)
+frida-server
+
+# 运行时数据/缓存/内容样本(勿分享)
+cache/
+catalog-live.json
+vod-sample.ts
+vod-root.xml
+*.ts
+*.log
+
+# 本地凭据(UI 登录后持久化在此,永不进仓库)
+creds.json
+.env
+
+# 系统
+.DS_Store
+
+# 废弃脚本(域名改用 nginx;见 README)
+setup-domain.sh
+port80-forward.js
+
+# 临时调试/探索脚本
+explore-vod.js
+test-poster.js
+test-search.js
+test-vod.js
+vodget.js
