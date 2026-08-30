@@ -157,7 +157,7 @@
 </div>
 <script src="/mpegts.js"></script>
 <script>
-let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0;
+let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null;
 let curFilm=null, curEps=[], curEpIdx=0, vodBase=0, vodDur=0, dragging=false, curSpeed=1, isLiveNow=false, curPct=0, switching=false;
 const $=id=>document.getElementById(id);
 const jget=async(u,o)=>{ const r=await fetch(u,o); if(!r.ok){ let m=''; try{m=(await r.json()).error||'';}catch(e){} throw new Error('HTTP '+r.status+(m?': '+m:'')); } return r.json(); };
@@ -228,7 +228,7 @@ function switchTab(m){ mode=m; closeDetail(); saveState();
   $('liveBox').style.display=m==='live'?'':'none'; $('vodBox').style.display=m==='vod'?'':'none';
   // 各tab独立列表:只在首次(列表还空)加载;之后切换只切显隐,完整保留内容与滚动位置。清空搜索框才回默认分类。
   if(m==='live'){ if(!$('listLive').children.length) renderChannels(channels); }
-  else { if(!cats.length) loadCats(); }
+  else { if(!$('cats').children.length) loadCats(); }   // chips 没渲染才加载(缓存秒开);已在就保留当前选择与列表
 }
 // 直播
 function renderChannels(arr){ const L=$('listLive'); L.innerHTML='';
@@ -241,12 +241,24 @@ function playLive(c){ curId=c.channelId; curFilm=null; curEps=[]; mark(c.channel
   startPlay(c.name,'/stream/'+encodeURIComponent(c.channelId),true);
   pushRecent({key:'live:'+c.channelId,type:'live',channelId:c.channelId,link:c.link,name:c.name,index:c.index}); saveState(); }
 // 点播
-async function loadCats(){ const my=++reqSeq; const d=await jget('/api/vod/categories'); if(my!==reqSeq&&cats.length)return; cats=d.categories||[];
-  const C=$('cats'); C.innerHTML='';
-  const rec=document.createElement('button'); rec.textContent='最近播放'; rec.onclick=()=>{document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));rec.classList.add('on');showRecent();}; C.appendChild(rec);
-  cats.forEach((c)=>{ const b=document.createElement('button'); b.textContent=c.type;
-    b.onclick=()=>{document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));b.classList.add('on');loadFilms(c.link);}; C.appendChild(b); });
-  if(my===reqSeq && !$('vq').value.trim()){ const first=C.querySelectorAll('button')[1]; if(first){first.classList.add('on');loadFilms(cats[0].link);} } }
+// 分类选择:curCat 永远以用户最新点击为准;异步数据回来若已切走则丢弃,绝不改变用户选择。分类本地缓存,秒开。
+function renderCats(){ const C=$('cats'); C.innerHTML='';
+  const rec=document.createElement('button'); rec.textContent='最近播放'; rec.dataset.key='recent'; rec.onclick=()=>selectCat('recent'); C.appendChild(rec);
+  cats.forEach(c=>{ const b=document.createElement('button'); b.textContent=c.type; b.dataset.key=c.link; b.onclick=()=>selectCat(c.link); C.appendChild(b); });
+  highlightCat(); }
+function highlightCat(){ document.querySelectorAll('#cats button').forEach(x=>x.classList.toggle('on', x.dataset.key===curCat)); }
+function selectCat(key){ const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
+  if(key==='recent'){ showRecent(); } else { loadFilms(key, my); } }
+function ensureDefaultSelection(){ if(curCat==null && cats.length && !$('vq').value.trim()){ selectCat(cats[0].link); } }   // 只在还没有任何选择时才选默认,不覆盖用户选择
+async function loadCats(){
+  // 1) 有本地缓存先瞬间渲染 chips(不等网络),用户马上能点
+  if(!cats.length){ const cached=LS.get('txtv_cats',null); if(cached&&cached.length){ cats=cached; renderCats(); ensureDefaultSelection(); } }
+  // 2) 后台拉最新;变了才重建 chips(重建也保留当前高亮),更新缓存。绝不改变用户已做的选择。
+  let d; try{ d=await jget('/api/vod/categories'); }catch(e){ return; }
+  const fresh=d.categories||[];
+  if(!cats.length || JSON.stringify(fresh)!==JSON.stringify(cats)){ cats=fresh; try{LS.set('txtv_cats',cats);}catch(e){} renderCats(); }
+  else { try{LS.set('txtv_cats',cats);}catch(e){} }
+  ensureDefaultSelection(); }
 function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML='';
   if(!r.length){ L.innerHTML='<div class="muted">还没有播放记录</div>'; return; }
   r.forEach(it=>{ const el=document.createElement('div'); el.className='row';
@@ -255,15 +267,15 @@ function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML=''
     else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
       el.innerHTML=`${pic}<span class="nm">${it.title||it.film.title}</span><span class="rk">${it.epname||''}</span>`; el.onclick=()=>openDetail(it.film); }
     L.appendChild(el); }); }
-async function loadFilms(path){ const my=++reqSeq; $('listVod').innerHTML='<div class="muted">加载中…</div>';
-  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }catch(e){ if(my===reqSeq)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
-  if(my!==reqSeq)return; films=d.films||[]; renderFilms(); }
+async function loadFilms(path, my){ if(my==null) my=++reqSeq; $('listVod').innerHTML='<div class="muted">加载中…</div>';
+  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }catch(e){ if(my===reqSeq&&curCat===path)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
+  if(my!==reqSeq || curCat!==path) return;   // 用户已切到别的分类:丢弃结果,不覆盖当前列表
+  films=d.films||[]; renderFilms(); }
 let vqTimer=null;
 $('vq').addEventListener('input',e=>{ const q=e.target.value.trim(); clearTimeout(vqTimer);
   if(!q){ const chips=document.querySelectorAll('#cats button'); if(chips[1])chips[1].click(); return; }
   vqTimer=setTimeout(()=>searchVod(q),350); });
-async function searchVod(q){ const my=++reqSeq;
-  document.querySelectorAll('#cats button').forEach(x=>x.classList.remove('on'));
+async function searchVod(q){ const my=++reqSeq; curCat='search'; highlightCat();   // 搜索态:取消所有分类高亮,curCat 标记为搜索
   $('listVod').innerHTML='<div class="muted">搜索中…</div>';
   let d; try{ d=await jget('/api/search?q='+encodeURIComponent(q)); }catch(e){ if(my===reqSeq)$('listVod').innerHTML='<div class="muted">搜索失败</div>'; return; }
   if(my!==reqSeq)return;
