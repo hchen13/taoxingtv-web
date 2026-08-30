@@ -138,11 +138,12 @@ function serveStream(req, res, playFn, label, isLive){
       // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
 
-      let ff=null, myPort=0, buffered=null;
+      let ff=null, myPort=0, buffered=null, badPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
         const r = await playFn();
         if(aborted) break;
-        if(!r || !r.port || r.port<=0){   // 原生 play 直接失败(如P2P核心没准备好)
+        if(!r || !r.port || r.port<=0){   // 原生 play 直接失败(如P2P核心没准备好/卡死,返回-1000等)
+          badPortCount++;
           console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+MAX_START_TRIES);
           try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
           await sleep(800); continue;
@@ -181,9 +182,13 @@ function serveStream(req, res, playFn, label, isLive){
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
         return;
       }
-      if(!ff){   // 多次重取都是死端口,放弃(前端会收到502后自行再试)
+      if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
-        try{ res.status(502).end('播放启动失败:多次取流均无数据'); }catch(e){}
+        if(badPortCount>=MAX_START_TRIES && state==='ready'){   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App,下次用全新核心自愈,不用手动重启
+          console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
+          needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+        }
+        try{ res.status(502).end('播放启动失败:'+(badPortCount>=MAX_START_TRIES?'P2P核心卡死,正在自动重启,请稍候重试':'多次取流均无数据')); }catch(e){}
         return;
       }
 
