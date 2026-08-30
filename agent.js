@@ -1,5 +1,5 @@
 📦
-481356 /agent-src.js
+481474 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13658,18 +13658,20 @@ var require_agent_src = __commonJS({
   "agent-src.js"() {
     init_node_globals();
     init_frida_java_bridge();
-    var CB = null;
+    var CB_CLASS = null;
+    var CB_INST = null;
     function ensureCB() {
-      if (CB) return CB;
+      if (CB_INST) return CB_INST;
       const ITell = frida_java_bridge_default.use("dnet.ITellMessage");
-      CB = frida_java_bridge_default.registerClass({
+      CB_CLASS = frida_java_bridge_default.registerClass({
         name: "com.txtv.Callback",
         implements: [ITell],
         methods: { tellMessage: function(i) {
-          send({ tell: i });
+          if (i === 2 || i === 4 || i >= 100 && i <= 103) send({ tell: i });
         } }
       });
-      return CB;
+      CB_INST = CB_CLASS.$new();
+      return CB_INST;
     }
     function dumpList(listVal, ChannelCls) {
       if (!listVal) return [];
@@ -13804,7 +13806,7 @@ var require_agent_src = __commonJS({
             } catch (e) {
             }
             step = "cb";
-            const cb = ensureCB().$new();
+            const cb = ensureCB();
             const p = parseInt(port, 10);
             step = "vodStart";
             const port_ = VC.vodStart(channelId, ip, p, ip, p, ip, p, percent | 0, cb, 1);
@@ -13824,7 +13826,7 @@ var require_agent_src = __commonJS({
             } catch (e) {
             }
             step = "cb";
-            const cb = ensureCB().$new();
+            const cb = ensureCB();
             step = "playbackStart";
             const port = frida_java_bridge_default.use("dnet.VideoClient").playbackStart(chid, startTime | 0, 2147483647, cb, 0);
             resolve({ port });

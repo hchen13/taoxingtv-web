@@ -94,7 +94,7 @@ async function bootEmulator(){
 }
 async function attach(){
   const dev=await frida.getUsbDevice(); let app=null;
-  for(let i=0;i<20;i++){ const apps=await dev.enumerateApplications(); app=apps.find(a=>a.identifier===PKG&&a.pid>0); if(app)break; await sleep(1000); }
+  for(let i=0;i<40;i++){ const apps=await dev.enumerateApplications(); app=apps.find(a=>a.identifier===PKG&&a.pid>0); if(app)break; await sleep(1000); }   // 崩溃冷重启后App启动可能>20s,放宽到40s避免"应用未就位"导致彻底断
   if(!app) throw new Error('应用未就位');
   session=await dev.attach(app.pid);
   session.detached.connect((reason)=>{ cleanupCurrent(); script=null; session=null;
@@ -125,7 +125,7 @@ setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>I
 let streamMutex=Promise.resolve();
 const FIRST_BYTE_MS = 10000;   // 首字节健康门限:门限内 ffmpeg 无输出=死端口(冷重启/崩溃恢复后首取常见)
 const MAX_START_TRIES = 3;     // 死端口/即时EOF 时内部自动重取,对前端透明
-function serveStream(req, res, playFn, label, isLive){
+function serveStream(req, res, playFn, label, isLive, nearEndVod){
   streamMutex = streamMutex.then(async()=>{
     const myToken = current.token + 1;
     let aborted=false; const onEarlyClose=()=>{ aborted=true; };
@@ -184,7 +184,7 @@ function serveStream(req, res, playFn, label, isLive){
       }
       if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
-        if(badPortCount>=MAX_START_TRIES && state==='ready'){   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App,下次用全新核心自愈,不用手动重启
+        if(badPortCount>=MAX_START_TRIES && state==='ready' && !nearEndVod){   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App自愈。但点播接近片尾的坏端口多半是"内容真结束",不算卡死,不冷重启(前端会判作播完跳下一集)
           console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
           needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
         }
@@ -345,7 +345,7 @@ app.get('/api/search', async (req,res)=>{
 app.get('/vod-stream', (req,res)=>{
   const {channelId, ip, port}=req.query; const percent=Math.max(0,Math.min(96,parseInt(req.query.percent||'0',10)||0));  // 上限96:冷启动在最后几%会撞P2P文件尾edge-catch;向前播放可正常到真片尾
   if(!channelId||!ip||!port){ return res.status(400).end('bad params'); }
-  serveStream(req,res,()=>script.exports.vodPlay(channelId, ip, parseInt(port,10), percent), 'vod:'+channelId, false);
+  serveStream(req,res,()=>script.exports.vodPlay(channelId, ip, parseInt(port,10), percent), 'vod:'+channelId, false, percent>=90);   // percent>=90 视为接近片尾
 });
 
 // ---------- 海报(P2P 下载 + 缓存,小并发池) ----------

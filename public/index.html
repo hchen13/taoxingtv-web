@@ -388,7 +388,8 @@ function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   // 蓝=已播放 / 白=已缓冲未播 / 灰=未缓冲
   $('seek').style.background='linear-gradient(to right, var(--acc) 0 '+played+'%, rgba(255,255,255,.9) '+played+'% '+buf+'%, rgba(255,255,255,.28) '+buf+'% 100%)'; }
 V.addEventListener('progress',updateSeekBar);
-V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
+V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(lastRecoverPos>=0 && pos>lastRecoverPos+10) lastRecoverPos=-1;  // 播放往前推进了 => 上次断流不是真结尾,清掉标记
+  $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
   const now=Date.now(); if(now-lastSave>3000){ lastSave=now; saveState(); } } });   // 节流:播放中每3秒真正存一次进度(原来是防抖,播放中永不触发)
 $('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
 $('seek').addEventListener('change',()=>{ dragging=false; commitSeek(parseFloat($('seek').value)); });
@@ -427,16 +428,22 @@ document.addEventListener('keydown',e=>{
 
 // —— 恢复策略(对齐原生App):临时卡顿不重取,让它自己缓冲恢复;
 //    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
-let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null;
+let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, lastRecoverPos=-1;
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
-function doRecover(){   // 仅用于真断流/解码错误:从当前位置重取(带上限防死循环)
+function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
-  if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime)>=vodDur*0.90){ atEnd(); return; }   // 近片尾断流=内容真结束(元数据常比实际长),不重取,避免末尾循环
+  if(!isLiveNow && curFilm && vodDur){ const vpos=vodBase+V.currentTime;
+    if(vpos >= vodDur*0.98){ lastRecoverPos=-1; atEnd(); return; }                                   // 已到98%,基本到头 -> 下一集
+    if(vpos >= vodDur*0.85 && lastRecoverPos>=0 && vpos <= lastRecoverPos+4){ lastRecoverPos=-1; atEnd(); return; }  // 片尾区重取后没往前(真没内容了) -> 下一集
+    lastRecoverPos = vpos;                                                                            // 记下这次断流位置;重取后若没进展就判真结束
+  } else { lastRecoverPos=-1; }
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
-  if(recoverTimes>5){ $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
+  if(recoverTimes>5){
+    if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime)>=vodDur*0.85){ recoverTimes=0; lastRecoverPos=-1; atEnd(); return; }  // 片尾区反复取不到=真到头,自动下一集(不弹"播放中断")
+    $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
   recovering=true; $('load').classList.add('show'); $('loadtx').textContent='恢复中…';
   const pos = isLiveNow ? 0 : (vodBase + V.currentTime);
   recoverTimer=setTimeout(()=>{ recoverTimer=null; try{
@@ -450,7 +457,7 @@ let wdLast=0, wdStall=0, checking=false;
 setInterval(async ()=>{
   if(!player||recovering){ wdStall=0; wdLast=V.currentTime; return; }
   const absPos = vodBase + V.currentTime;
-  const nearEnd = curFilm && vodDur && absPos >= vodDur*0.90;   // 内容常在标称时长前1~2%结束,末10%都算片尾区
+  const nearEnd = curFilm && vodDur && absPos >= vodDur*0.98;   // 只有到98%才算"基本到头";90-98%的断流先重取续播(见doRecover),不再直接跳下一集
   if(V.paused){   // 暂停:只在"停在缓冲末尾且近片尾+流已断"时判真结束(否则是用户主动暂停,不动)
     const bufEnd = V.buffered.length ? V.buffered.end(V.buffered.length-1) : 0;
     if(nearEnd && curFilm && V.currentTime>=bufEnd-1.0 && !checking){ checking=true;

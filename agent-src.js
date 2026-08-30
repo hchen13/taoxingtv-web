@@ -1,12 +1,16 @@
 import Java from 'frida-java-bridge';
 
-let CB = null;
+// 持久单例回调:attach 后建一次、全局引用永不 GC,所有 play/vodPlay 复用。
+// (Frida 坑:每次 $new 的注册类实例若被 JS 侧 GC,原生 P2P 线程之后回调它 -> native SIGSEGV 崩溃。
+//  这正是本项目 App "每隔几分钟崩一次(电视上不崩)"的根因。)
+let CB_CLASS = null, CB_INST = null;
 function ensureCB() {
-  if (CB) return CB;
+  if (CB_INST) return CB_INST;
   const ITell = Java.use('dnet.ITellMessage');
-  CB = Java.registerClass({ name: 'com.txtv.Callback', implements: [ITell],
-    methods: { tellMessage: function (i) { send({ tell: i }); } } });
-  return CB;
+  CB_CLASS = Java.registerClass({ name: 'com.txtv.Callback', implements: [ITell],
+    methods: { tellMessage: function (i) { if (i === 2 || i === 4 || (i >= 100 && i <= 103)) send({ tell: i }); } } });
+  CB_INST = CB_CLASS.$new();
+  return CB_INST;
 }
 function dumpList(listVal, ChannelCls) {
   if (!listVal) return [];
@@ -88,7 +92,7 @@ rpc.exports = {
       let step='start';
       try {
         step='stopPrev'; const VC=Java.use('dnet.VideoClient'); try{VC.playbackStop();}catch(e){} try{VC.vodStop();}catch(e){}
-        step='cb'; const cb=ensureCB().$new(); const p=parseInt(port,10);
+        step='cb'; const cb=ensureCB(); const p=parseInt(port,10);   // 复用持久单例,不再每次 $new
         step='vodStart'; const port_=VC.vodStart(channelId, ip, p, ip, p, ip, p, (percent|0), cb, 1);
         resolve({ port: port_ });
       } catch(e){ reject('at['+step+']: '+(e&&(e.stack||e.message||e)||'unknown')); }
@@ -99,7 +103,7 @@ rpc.exports = {
       let step='start';
       try {
         step='stopPrev'; try { Java.use('dnet.VideoClient').playbackStop(); } catch(e){}
-        step='cb'; const cb = ensureCB().$new();
+        step='cb'; const cb = ensureCB();   // 复用持久单例,不再每次 $new
         step='playbackStart';
         const port = Java.use('dnet.VideoClient').playbackStart(chid, (startTime|0), 2147483647, cb, 0);
         resolve({ port: port });
