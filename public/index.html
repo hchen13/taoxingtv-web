@@ -45,6 +45,8 @@
   .stage.ui .ptitle{opacity:1}
   .pctl{position:absolute;left:0;right:0;bottom:0;padding:26px 18px 14px;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent);display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .2s;z-index:4}
   .stage.ui .pctl{opacity:1}
+  .stage:fullscreen:not(.ui) video{cursor:none}          /* 全屏且鼠标静止(控制栏已隐藏)时隐藏光标,不挡画面;一动就随控制栏一起回来 */
+  .stage:-webkit-full-screen:not(.ui) video{cursor:none}
   .pbtn{height:40px;min-width:40px;padding:0 8px;border:none;background:transparent;color:#fff;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:8px;white-space:nowrap}
   .pbtn:hover{background:rgba(255,255,255,.15)}
   .pbtn.txt{font-size:14px}
