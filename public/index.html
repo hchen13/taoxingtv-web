@@ -60,6 +60,7 @@
   .pbtn:disabled:hover{background:transparent}
   .tm{color:#e8ebf2;font-size:14px;font-variant-numeric:tabular-nums;flex:none;min-width:56px;text-align:center}
   .seek{flex:1;min-width:80px;-webkit-appearance:none;height:6px;border-radius:3px;background:rgba(255,255,255,.28);outline:none;cursor:pointer}
+  #seekTip{position:fixed;transform:translate(-50%,-100%);background:rgba(0,0,0,.88);color:#fff;font-size:14px;padding:4px 9px;border-radius:7px;pointer-events:none;z-index:12;display:none;font-variant-numeric:tabular-nums;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.5)}
   .seek::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#fff;cursor:pointer;box-shadow:0 0 0 3px rgba(59,130,246,.45)}
   .volsl{width:88px;-webkit-appearance:none;height:5px;border-radius:3px;background:rgba(255,255,255,.28);outline:none;cursor:pointer}
   .volsl::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:#fff;cursor:pointer}
@@ -71,16 +72,20 @@
   select.vodOnly{display:none}.stage.vod select.vodOnly{display:inline-block}
   .volpop{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.7);color:#fff;padding:10px 18px;border-radius:10px;font-size:20px;font-weight:600;opacity:0;transition:opacity .25s;pointer-events:none;z-index:6}
   .volpop.show{opacity:1}
-  .detail{position:absolute;inset:0;background:rgba(13,15,20,.97);z-index:8;display:none;padding:28px 34px;overflow-y:auto}
+  .detail{position:absolute;inset:0;background:rgba(13,15,20,.97);z-index:8;display:none;padding:34px 44px;overflow-y:auto}
   .detail.show{display:block}
-  .detail .head{display:flex;gap:22px;margin-bottom:20px}
-  .detail .poster{width:150px;height:210px;flex:none;border-radius:10px;background:var(--panel2) center/cover no-repeat;box-shadow:0 4px 18px rgba(0,0,0,.4)}
-  .detail h2{font-size:24px;margin-bottom:8px}
-  .detail .meta{color:var(--dim);font-size:13px;margin-bottom:12px;line-height:1.9}
-  .detail .desc{color:#c3cad8;font-size:13px;line-height:1.7;max-width:820px}
-  .detail .epstitle{color:var(--dim);font-size:13px;margin:6px 0 10px}
-  .detail .eps{display:grid;gap:8px}
-  .detail .eps button{padding:9px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);cursor:pointer;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .detail .head{display:flex;gap:34px;margin-bottom:28px}
+  .detail .poster{width:270px;height:378px;flex:none;border-radius:12px;background:var(--panel2) center/cover no-repeat;box-shadow:0 4px 18px rgba(0,0,0,.4)}
+  .detail h2{font-size:38px;margin-bottom:16px}
+  .detail .meta{color:var(--dim);font-size:18px;margin-bottom:18px;line-height:2.0}
+  .detail .desc{color:#c3cad8;font-size:18px;line-height:1.85;max-width:1000px}
+  .detail .epstitle{color:var(--dim);font-size:18px;margin:14px 0 14px}
+  .detail .eps{display:grid;gap:24px 12px}
+  .detail .eps .epcell{position:relative}
+  .detail .eps .epcell>button{width:100%}
+  .detail .eps .epcell.last>button{border-color:var(--acc);background:#243049}
+  .detail .eps .epcell.last::after{content:'上次看到';position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:var(--acc);color:#fff;font-size:12px;font-weight:600;padding:2px 9px;border-radius:9px;white-space:nowrap;z-index:2;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.45)}
+  .detail .eps button{padding:16px 16px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);cursor:pointer;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .detail .eps button:hover{border-color:var(--acc);background:#243049}
   .detail .close{position:absolute;top:18px;right:22px;background:none;border:none;color:var(--dim);font-size:26px;cursor:pointer;z-index:9}
   #wake{position:fixed;inset:0;z-index:99;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
@@ -127,7 +132,7 @@
         <button class="pbtn txt vodOnly" id="prevBtn" title="上一集">⏮</button>
         <button class="pbtn txt vodOnly" id="nextBtn" title="下一集">⏭</button>
         <span class="tm vodOnly" id="curT">0:00</span>
-        <input type="range" class="seek vodOnly" id="seek" min="0" max="1000" value="0">
+        <input type="range" class="seek vodOnly" id="seek" min="0" max="1000" value="0"><div id="seekTip"></div>
         <span class="tm vodOnly" id="totT">0:00</span>
         <span class="liveInd liveOnly" id="liveInd">● 直播中</span>
         <span style="flex:1" class="liveOnly"></span>
@@ -277,10 +282,13 @@ function renderDetail(){ if(!lastDetail)return; const {f,d}=lastDetail; const m=
   $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
   $('dDesc').textContent=m.content||''; const E=$('dEps'); E.innerHTML='';
   const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
-  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+Math.min(220,Math.max(56,maxLen*15+22))+'px,1fr))';
-  eps.forEach((ep,i)=>{ const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
-    if(curFilm&&curFilm.playid===f.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
-    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(0); }; E.appendChild(b); }); }
+  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+Math.min(320,Math.max(76,maxLen*24+40))+'px,1fr))';
+  const lastEp=(LS.get('txtv_lastep',{}))[f.playid];   // 本片上次看到的集(undefined=没看过)
+  eps.forEach((ep,i)=>{ const cell=document.createElement('div'); cell.className='epcell';
+    const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
+    if(lastEp===i){ cell.classList.add('last'); }
+    else if(curFilm&&curFilm.playid===f.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
+    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(0); }; cell.appendChild(b); E.appendChild(cell); }); }
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
 function closeDetail(){ $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
@@ -289,7 +297,9 @@ function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=e
   const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
   const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}`;
   startPlay(title,url,false); updEpBtns();
-  pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm}); saveState(); }
+  pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm});
+  { const le=LS.get('txtv_lastep',{}); le[curFilm.playid]=curEpIdx; LS.set('txtv_lastep',le); }  // 记录本片上次看到的集
+  saveState(); }
 function playVodAt(percent){ playEpisode(percent); }
 function updEpBtns(){ $('prevBtn').disabled=curEpIdx<=0; $('nextBtn').disabled=curEpIdx>=curEps.length-1; }
 $('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(0);} };
@@ -327,7 +337,7 @@ STAGE.addEventListener('dblclick',e=>{ if(e.target.closest('.pctl')||e.target.cl
 function togglePP(){ if(!player)return; if(V.paused)V.play(); else V.pause(); }
 $('ppBtn').onclick=togglePP;
 V.addEventListener('play',()=>{$('ppBtn').textContent='⏸';});
-V.addEventListener('pause',()=>{$('ppBtn').textContent='▶';});
+V.addEventListener('pause',()=>{$('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState();});
 $('speed').onchange=e=>{ curSpeed=parseFloat(e.target.value); V.playbackRate=curSpeed; };
 $('fsBtn').onclick=toggleFS;
 function toggleFS(){ if(document.fullscreenElement){document.exitFullscreen();} else {STAGE.requestFullscreen&&STAGE.requestFullscreen();} }
@@ -337,7 +347,7 @@ $('volBtn').onclick=()=>{ V.muted=!V.muted; $('vol').value=V.muted?0:V.volume; u
 function updVolIcon(){ $('volBtn').textContent=(V.muted||V.volume===0)?'🔇':(V.volume<0.5?'🔉':'🔊'); }
 function setVol(delta){ V.muted=false; V.volume=Math.max(0,Math.min(1,+(V.volume+delta).toFixed(2))); $('vol').value=V.volume; updVolIcon();
   const p=$('volpop'); p.textContent='🔊 '+Math.round(V.volume*100)+'%'; p.classList.add('show'); clearTimeout(p._t); p._t=setTimeout(()=>p.classList.remove('show'),700); }
-let saveTimer=null;
+let saveTimer=null, lastSave=0;
 function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   const cur=dragging?parseFloat($('seek').value||0):(vodBase+V.currentTime);
   const played=Math.max(0,Math.min(100,cur/dur*100));
@@ -346,9 +356,13 @@ function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   $('seek').style.background='linear-gradient(to right, var(--acc) 0 '+played+'%, rgba(255,255,255,.9) '+played+'% '+buf+'%, rgba(255,255,255,.28) '+buf+'% 100%)'; }
 V.addEventListener('progress',updateSeekBar);
 V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
-  clearTimeout(saveTimer); saveTimer=setTimeout(saveState,3000); } });
+  const now=Date.now(); if(now-lastSave>3000){ lastSave=now; saveState(); } } });   // 节流:播放中每3秒真正存一次进度(原来是防抖,播放中永不触发)
 $('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
 $('seek').addEventListener('change',()=>{ dragging=false; commitSeek(parseFloat($('seek').value)); });
+$('seek').addEventListener('mousemove',e=>{ if(isLiveNow||!vodDur){ $('seekTip').style.display='none'; return; }
+  const r=$('seek').getBoundingClientRect(); const frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+  const t=$('seekTip'); t.textContent=fmt(frac*vodDur); t.style.left=e.clientX+'px'; t.style.top=(r.top-9)+'px'; t.style.display='block'; });
+$('seek').addEventListener('mouseleave',()=>{ $('seekTip').style.display='none'; });
 function commitSeek(absSec){ if(!curFilm||!vodDur)return; absSec=Math.max(0,Math.min(vodDur-1,absSec));
   const bufEnd=V.buffered.length?vodBase+V.buffered.end(V.buffered.length-1):vodBase;
   if(absSec>=vodBase && absSec<=bufEnd){ V.currentTime=absSec-vodBase; saveState(); return; }  // 缓冲内:精确无缝
