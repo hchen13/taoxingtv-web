@@ -31,8 +31,8 @@ function spawnTranscode(srcPort, isLive){
   // 直播:transient P2P 抖动时底层重连更顺;点播:绝不重连——EOF=内容真结束,重连会反复GET已结束端口把原生app打崩
   const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
   // 点播:P2P会下载超前,用2x读+编码器全速产出,填出~30秒深缓冲吸收P2P抖动(像原生mpv,不卡);
-  // 直播:实时源只有1x内容,只能1x读+realtime编码(否则立刻追上直播边缘EOF)
-  const rate = isLive ? ['-readrate','1.0','-readrate_initial_burst','2'] : ['-readrate','2.0'];  // 点播:2x持续读快速填/回填深缓冲;上限由 serveStream 反馈节流控制(有界~20秒)
+  // 直播:1x实时读 + 断供后 catchup 4x 把源的追赶突发拉进来回填(实测源快读不会EOF,稳定攒~11秒深缓冲),initial_burst 开台垫底
+  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','2.0'];  // 点播:2x持续读快速填/回填深缓冲;上限由 serveStream 反馈节流控制(有界~20秒)
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
@@ -54,7 +54,7 @@ function spawnTranscode(srcPort, isLive){
 let state='off', bootStep='', bootPromise=null;
 let script=null, session=null, catalog=null;
 // current: 当前活动流。token=递增唯一标识(不用端口,端口会复用);ended=收到tellMessage(2)真结束;ffExited=ffmpeg已退出
-let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false };
+let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false };
 let curBuf=0;  // 前端上报的点播缓冲深度(秒),用于反馈节流
 let lastActivity=Date.now();
 
@@ -67,7 +67,7 @@ function appRunning(){ return adb(['shell','pidof',PKG]).trim().length>0; }
 function cleanupCurrent(){
   if(current.ff){ try{current.ff.kill('SIGKILL');}catch(e){} }
   if(current.port){ try{ if(script)script.exports.stop().catch(()=>{}); }catch(e){} adb(['forward','--remove','tcp:'+current.port]); }
-  current={token:current.token, chid:null, port:null, ff:null, ended:false, ffExited:false};
+  current={token:current.token, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
 }
 
 let needColdRestart=false;
@@ -123,25 +123,77 @@ setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>I
 
 // ---------- 取流(直播/点播共用),token化+串行化 ----------
 let streamMutex=Promise.resolve();
+const FIRST_BYTE_MS = 10000;   // 首字节健康门限:门限内 ffmpeg 无输出=死端口(冷重启/崩溃恢复后首取常见)
+const MAX_START_TRIES = 3;     // 死端口/即时EOF 时内部自动重取,对前端透明
 function serveStream(req, res, playFn, label, isLive){
   streamMutex = streamMutex.then(async()=>{
     const myToken = current.token + 1;
+    let aborted=false; const onEarlyClose=()=>{ aborted=true; };
+    req.on('close', onEarlyClose);
     try {
       await ensureReady();
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
       const hadStream=!!current.port; cleanupCurrent();
       if(hadStream) await sleep(700);   // 上一路流 stop 后给原生P2P引擎settle,否则快速重取(seek)会拿到立即EOF的死端口
-      const r = await playFn();
-      if(!r || !r.port || r.port<=0){ try{res.status(502).end('播放启动失败: '+(r&&r.port));}catch(e){} return; }
-      if(res.writableEnded||req.destroyed){ try{if(script)script.exports.stop().catch(()=>{});}catch(e){} adb(['forward','--remove','tcp:'+r.port]); return; }
-      adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
-      const myPort=r.port; const ff=spawnTranscode(myPort, isLive);
-      current={ token:myToken, chid:label, port:myPort, ff, ended:false, ffExited:false };
+      // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
+      current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
+
+      let ff=null, myPort=0, buffered=null;
+      for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
+        const r = await playFn();
+        if(aborted) break;
+        if(!r || !r.port || r.port<=0){   // 原生 play 直接失败(如P2P核心没准备好)
+          console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+MAX_START_TRIES);
+          try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+          await sleep(800); continue;
+        }
+        const port=r.port;
+        adb(['forward','tcp:'+port,'tcp:'+port]);
+        const cand=spawnTranscode(port, isLive);
+        // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
+        const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
+        const gotData = await new Promise(resolve=>{
+          timer=setTimeout(()=>resolve(false), FIRST_BYTE_MS);
+          onFirst=()=>resolve(true); onCandExit=()=>resolve(false);
+          cand.stdout.on('data', collect);
+          cand.stdout.once('data', onFirst);
+          cand.once('exit', onCandExit);
+        });
+        clearTimeout(timer);
+        cand.stdout.removeListener('data', onFirst); cand.removeListener('exit', onCandExit);
+        if(gotData && !aborted){
+          cand.stdout.removeListener('data', collect);
+          ff=cand; myPort=port; buffered=buf;
+          if(attempt>1) console.log('['+label+'] 第'+attempt+'次取流出数据(前'+(attempt-1)+'次死端口)');
+          break;
+        }
+        console.log('['+label+'] 端口'+port+' '+(FIRST_BYTE_MS/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
+        try{ cand.kill('SIGKILL'); }catch(e){}
+        try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+        adb(['forward','--remove','tcp:'+port]);
+        await sleep(800);
+      }
+
+      if(aborted || res.writableEnded || req.destroyed){   // 客户端在启动期就走了
+        if(ff){ try{ff.kill('SIGKILL');}catch(e){} }
+        try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+        if(myPort) adb(['forward','--remove','tcp:'+myPort]);
+        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+        return;
+      }
+      if(!ff){   // 多次重取都是死端口,放弃(前端会收到502后自行再试)
+        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+        try{ res.status(502).end('播放启动失败:多次取流均无数据'); }catch(e){}
+        return;
+      }
+
+      current={ token:myToken, chid:label, port:myPort, ff, ended:false, ffExited:false, starting:false };
       curBuf=0;
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
       ff.stdout.on('data',()=>{ const now=Date.now(); if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活
+      if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       ff.stdout.pipe(res);
       // 点播深缓冲上限:前端上报 curBuf,>20秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<16秒续读 -> 缓冲稳定16-20秒,抖动自动回填
       let bufPaused=false;
@@ -151,9 +203,12 @@ function serveStream(req, res, playFn, label, isLive){
       }, 1000);
       ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
       ff.on('exit',()=>{ if(current.token===myToken) current.ffExited=true; });
-      const teardown=()=>{ if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ try{if(script)script.exports.stop().catch(()=>{});}catch(e){} adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false}; } };
+      const teardown=()=>{ if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ try{if(script)script.exports.stop().catch(()=>{});}catch(e){} adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; } };
       res.on('close',teardown); res.on('error',teardown);
-    } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){} }
+    } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
+      if(current.token===myToken && current.starting){ current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; }
+    }
+    finally { req.removeListener('close', onEarlyClose); }
   });
   return streamMutex;
 }
@@ -163,11 +218,11 @@ const app = express();
 app.use(express.json());
 app.get('/', (req,res)=>{ res.set('Cache-Control','no-cache, no-store, must-revalidate'); res.sendFile(__dirname+'/public/index.html'); });
 app.get('/mpegts.js', (req,res)=>res.sendFile(__dirname+'/node_modules/mpegts.js/dist/mpegts.js'));
-app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive: !!current.ff && !current.ffExited}));
+app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting}));
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: !!current.ff && !current.ffExited, chid:current.chid }));
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting, chid:current.chid }));
 app.get('/api/buf', (req,res)=>{ curBuf=parseFloat(req.query.d)||0; res.json({ok:true}); });  // 前端上报点播缓冲深度
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——

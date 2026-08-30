@@ -203,14 +203,20 @@ async function doLogin(){
 }
 ['liAccount','liPassword'].forEach(id=>{ const el=$(id); if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); }); });
 // —— 状态持久化 ——
+// —— 观看进度:每个节目(playid)只存一条 {ep:最后看的那一集, pct:该集的时刻%}。换集=刷新覆盖,不为每集单独存 ——
+function getProg(){ return LS.get('txtv_prog',{}); }
+function saveProg(playid, ep, pct){ if(playid==null) return; const all=getProg(); all[playid]={ep:ep, pct:(pct>=0?pct:0)}; LS.set('txtv_prog',all); }
+function resumePctFor(playid, ep){ const p=getProg()[playid]; if(!p||p.ep!==ep) return 0;   // 只有点的正是"最后看的那一集"才续播;别的集从头
+  if(p.pct==null||p.pct<1||p.pct>=95) return 0; return Math.min(96,Math.floor(p.pct)); }       // 几乎没看/已看完 => 从头
 function saveState(){ const s={tab:mode};
-  if(curFilm){ s.vod={film:curFilm,eps:curEps,idx:curEpIdx,dur:vodDur,percent: vodDur?((vodBase+V.currentTime)/vodDur*100):0}; }
+  if(curFilm){ const pct=vodDur?((vodBase+V.currentTime)/vodDur*100):0; s.vod={film:curFilm,eps:curEps,idx:curEpIdx,dur:vodDur,percent:pct};
+    if(!isLiveNow && curFilm.playid!=null) saveProg(curFilm.playid, curEpIdx, pct); }
   else if(curId&&isLiveNow){ const c=channels.find(x=>x.channelId===curId); if(c)s.live={id:c.channelId,link:c.link,name:c.name,index:c.index}; }
   LS.set('txtv_state',s); }
 async function restore(){ const s=LS.get('txtv_state',null);
   if(!s){ renderChannels(channels); return; }
   if(s.vod&&s.vod.film){ switchTab('vod'); curFilm=s.vod.film; curEps=s.vod.eps||[]; curEpIdx=s.vod.idx||0; vodDur=s.vod.dur||0;
-    if(curEps[curEpIdx]) playEpisode(Math.max(0,Math.min(99,Math.floor((s.vod.percent||0))))); }
+    if(curEps[curEpIdx]){ const rp=resumePctFor(curFilm.playid,curEpIdx); playEpisode(rp||Math.max(0,Math.min(96,Math.floor(s.vod.percent||0)))); } }
   else if(s.live&&s.live.id){ switchTab('live'); playLive({channelId:s.live.id,link:s.live.link,name:s.live.name,index:s.live.index}); }
   else { switchTab(s.tab||'live'); }
 }
@@ -288,7 +294,7 @@ function renderDetail(){ if(!lastDetail)return; const {f,d}=lastDetail; const m=
     const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
     if(lastEp===i){ cell.classList.add('last'); }
     else if(curFilm&&curFilm.playid===f.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
-    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(0); }; cell.appendChild(b); E.appendChild(cell); }); }
+    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(f.playid,i)); }; cell.appendChild(b); E.appendChild(cell); }); }
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
 function closeDetail(){ $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
@@ -302,8 +308,8 @@ function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=e
   saveState(); }
 function playVodAt(percent){ playEpisode(percent); }
 function updEpBtns(){ $('prevBtn').disabled=curEpIdx<=0; $('nextBtn').disabled=curEpIdx>=curEps.length-1; }
-$('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(0);} };
-$('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(0);} };
+$('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(resumePctFor(curFilm.playid,curEpIdx));} };
+$('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(resumePctFor(curFilm.playid,curEpIdx));} };
 // 通用播放
 function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
 function toggleSide(){ const app=document.querySelector('.app'); const c=app.classList.toggle('collapsed'); $('sideTgl').textContent=c?'›':'‹'; try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} }
@@ -314,7 +320,12 @@ function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; windo
   if(player){try{player.destroy()}catch(e){}player=null;}
   // 直播和点播都是"连续流"(点播靠 percent 重启来跳转),统一用 isLive:true 避免 VOD 模式的 range 请求/缓冲上限关连接
   player=mpegts.createPlayer({type:'mpegts',isLive:true,url:url},
-    {enableWorker:false, liveBufferLatencyChasing:isLive, liveBufferLatencyMaxLatency:isLive?5.0:30.0, liveBufferLatencyMinRemain:isLive?1.0:5.0, lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
+    {enableWorker:false,
+     // 直播:关掉"追帧"(旧逻辑缓冲一超5秒就硬seek砍到1秒,把能吸收源抖动的余量丢掉);保留服务端catchup攒起来的深缓冲,
+     // 只在缓冲>30秒时用1.08x轻微追平(liveSync平滑不硬跳)。点播 liveSync:false 不受影响。
+     liveBufferLatencyChasing:false,
+     liveSync:isLive, liveSyncMaxLatency:isLive?30:1.2, liveSyncTargetLatency:isLive?18:0.8, liveSyncPlaybackRate:1.08,
+     lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
   player.attachMediaElement(V); player.load();
   V.oncanplay=()=>{$('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
     if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
@@ -397,7 +408,7 @@ document.addEventListener('keydown',e=>{
 let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null;
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
-  if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(0); }
+  if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
 function doRecover(){   // 仅用于真断流/解码错误:从当前位置重取(带上限防死循环)
   if(recovering||!player) return;
