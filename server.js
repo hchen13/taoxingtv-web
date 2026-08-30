@@ -32,7 +32,7 @@ function spawnTranscode(srcPort, isLive){
   const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
   // 点播:P2P会下载超前,用2x读+编码器全速产出,填出~30秒深缓冲吸收P2P抖动(像原生mpv,不卡);
   // 直播:1x实时读 + 断供后 catchup 4x 把源的追赶突发拉进来回填(实测源快读不会EOF,稳定攒~11秒深缓冲),initial_burst 开台垫底
-  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','2.0'];  // 点播:2x持续读快速填/回填深缓冲;上限由 serveStream 反馈节流控制(有界~20秒)
+  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','2.0'];  // 点播:2x持续读快速填/回填深缓冲;上限由 serveStream 反馈节流控制(有界~60秒)
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
@@ -195,11 +195,11 @@ function serveStream(req, res, playFn, label, isLive){
       ff.stdout.on('data',()=>{ const now=Date.now(); if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活
       if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       ff.stdout.pipe(res);
-      // 点播深缓冲上限:前端上报 curBuf,>20秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<16秒续读 -> 缓冲稳定16-20秒,抖动自动回填
+      // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<56秒续读 -> 缓冲稳定56-60秒,抖动自动回填(读速2x,1x播放约60秒填满)
       let bufPaused=false;
       const throttle = isLive ? null : setInterval(()=>{
         if(current.token!==myToken){ clearInterval(throttle); return; }
-        try{ if(!bufPaused && curBuf>20){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<16){ ff.stdout.resume(); bufPaused=false; } }catch(e){}
+        try{ if(!bufPaused && curBuf>60){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ ff.stdout.resume(); bufPaused=false; } }catch(e){}
       }, 1000);
       ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
       ff.on('exit',()=>{ if(current.token===myToken) current.ffExited=true; });
