@@ -248,9 +248,10 @@ function renderCats(){ const C=$('cats'); C.innerHTML='';
   highlightCat(); }
 function highlightCat(){ document.querySelectorAll('#cats button').forEach(x=>x.classList.toggle('on', x.dataset.key===curCat)); }
 function selectCat(key){ const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
-  if(key==='recent'){ showRecent(); }
-  else if(filmsCache[key]){ films=filmsCache[key]; renderFilms(); }   // 本会话已加载过这个分类:直接用缓存,不再重新加载
-  else { loadFilms(key, my); } }
+  if(key==='recent'){ showRecent(); return; }
+  const hasCache=!!filmsCache[key];
+  if(hasCache){ films=filmsCache[key]; renderFilms(); }   // 先秒显当前缓存
+  loadFilms(key, my, !hasCache); }                        // 再后台拉最新;无缓存时才显示"加载中"
 function ensureDefaultSelection(){ if(curCat==null && cats.length && !$('vq').value.trim()){ selectCat(cats[0].link); } }   // 只在还没有任何选择时才选默认,不覆盖用户选择
 async function loadCats(){
   // 1) 有本地缓存先瞬间渲染 chips(不等网络),用户马上能点
@@ -269,10 +270,15 @@ function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML=''
     else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
       el.innerHTML=`${pic}<span class="nm">${it.title||it.film.title}</span><span class="rk">${it.epname||''}</span>`; el.onclick=()=>openDetail(it.film); }
     L.appendChild(el); }); }
-async function loadFilms(path, my){ if(my==null) my=++reqSeq; $('listVod').innerHTML='<div class="muted">加载中…</div>';
-  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }catch(e){ if(my===reqSeq&&curCat===path)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
-  if(my!==reqSeq || curCat!==path) return;   // 用户已切到别的分类:丢弃结果,不覆盖当前列表
-  films=d.films||[]; filmsCache[path]=films; renderFilms(); }   // 缓存本分类片单,下次切回来秒显
+async function loadFilms(path, my, showLoading){ if(my==null) my=++reqSeq;
+  if(showLoading) $('listVod').innerHTML='<div class="muted">加载中…</div>';
+  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }
+  catch(e){ if(showLoading && my===reqSeq && curCat===path)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
+  const listData=d.films||[];
+  const changed=JSON.stringify(listData)!==JSON.stringify(filmsCache[path]);
+  filmsCache[path]=listData;   // 总是写缓存(即使已切走)——反复快速切换也能缓存成功,修复"永远加载不出来"
+  if(my===reqSeq && curCat===path && (showLoading || changed)){ films=listData; renderFilms(); }   // 还在本分类:首次加载 或 内容变了 才渲染
+}
 let vqTimer=null;
 $('vq').addEventListener('input',e=>{ const q=e.target.value.trim(); clearTimeout(vqTimer);
   if(!q){ const chips=document.querySelectorAll('#cats button'); if(chips[1])chips[1].click(); return; }
