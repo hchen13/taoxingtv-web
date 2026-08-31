@@ -399,7 +399,7 @@ function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   // 蓝=已播放 / 白=已缓冲未播 / 灰=未缓冲
   $('seek').style.background='linear-gradient(to right, var(--acc) 0 '+played+'%, rgba(255,255,255,.9) '+played+'% '+buf+'%, rgba(255,255,255,.28) '+buf+'% 100%)'; }
 V.addEventListener('progress',updateSeekBar);
-V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(lastRecoverPos>=0 && pos>lastRecoverPos+10){ lastRecoverPos=-1; recoverTimes=0; }  // 播放真往前推进了 => 上次断流不是真结尾,清标记+重置恢复计数(循环重取因为没进展,计数不会被清,最终触发上限停下)
+V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(recoverTimes && pos>recoverPos+10){ recoverTimes=0; }  // 播放真往前推进了 => 上次中断已恢复,重置恢复计数(原地循环重取因为没进展不会被清,最终触发上限停下)
   $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
   const now=Date.now(); if(now-lastSave>3000){ lastSave=now; saveState(); } } });   // 节流:播放中每3秒真正存一次进度(原来是防抖,播放中永不触发)
 $('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
@@ -439,20 +439,17 @@ document.addEventListener('keydown',e=>{
 
 // —— 恢复策略(对齐原生App):临时卡顿不重取,让它自己缓冲恢复;
 //    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
-let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, lastRecoverPos=-1;
+let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1;
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
-  if(!isLiveNow && curFilm && vodDur){ const vpos=vodBase+V.currentTime;
-    if(vpos >= vodDur*0.98){ lastRecoverPos=-1; atEnd(); return; }                                   // 只有真到98%(片尾)才跳集;90-98%的源故障(死端口/崩溃)一律重取续播,绝不提前跳集——与看门狗nearEnd(0.98)一致。真结束由原生tell==2(看门狗st.ended)兜底
-    lastRecoverPos = vpos;                                                                            // 记下这次断流位置;重取后若没进展就判真结束
-  } else { lastRecoverPos=-1; }
+  if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime) >= vodDur*0.98){ atEnd(); return; }   // 到片尾=真结束,下一集;其余一律当故障重取续播
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
-  if(recoverTimes>5){
-    if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime)>=vodDur*0.98){ recoverTimes=0; lastRecoverPos=-1; atEnd(); return; }  // 只有真到98%反复取不到才自动下一集;90-98%源故障=弹"播放中断,请重选",绝不误跳集
+  recoverPos = isLiveNow?0:(vodBase+V.currentTime);
+  if(recoverTimes>5){   // 反复重取都失败=真出问题了,老实告诉用户,绝不拿"可能是放完了"来搪塞
     $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
   recovering=true; $('load').classList.add('show'); $('loadtx').textContent='恢复中…';
   const pos = isLiveNow ? 0 : (vodBase + V.currentTime);
@@ -462,7 +459,9 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   }catch(e){} recovering=false; }, 600);
 }
 V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
-V.addEventListener('ended', ()=>{   // 点播"结束":到真片尾(>=98%)才下一集;中途就结束=源提前EOF/断流,从当前位置重取续播,别锁死在原地循环那几秒
+V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。
+                                    // (注:回调已换成App自己的VodPlayActivity实例以消除崩溃,tell==2不再回传JS,故不依赖它)
+                                    // 位置没到片尾就ended = 源中途EOF/故障 -> 从当前位置重取续播
   if(isLiveNow||!curFilm||!vodDur||recovering||switching) return;
   if((vodBase+V.currentTime) >= vodDur*0.98) atEnd(); else doRecover(); });
 // 卡顿看门狗:进度冻结且无数据(readyState<3)约12秒 -> 查 streamstate 决定怎么办
