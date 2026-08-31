@@ -475,11 +475,12 @@ setInterval(async ()=>{
   }
   const frozen = Math.abs(V.currentTime-wdLast)<0.1; wdLast=V.currentTime;
   if(frozen && V.readyState<3){ wdStall++; } else { wdStall=0; }
-  if(wdStall>=4 && !checking){ wdStall=0; checking=true;
+  if(wdStall>=4 && !checking){ checking=true;
     try{ const st=await jget('/api/streamstate');
-      if(st.ended && curFilm){ atEnd(); }                 // 原生 tell==2(若触发)
-      else if(!st.alive){ if(nearEnd && curFilm) atEnd(); else doRecover(); }   // 断流:近尾=放完(下一集/结束),中途=重取
-      // alive 且未结束 = 临时卡顿 = 不动,等缓冲自愈
+      if(st.ended && curFilm){ wdStall=0; atEnd(); }                 // 原生 tell==2(若触发)
+      else if(!st.alive){ wdStall=0; if(nearEnd && curFilm) atEnd(); else doRecover(); }   // 断流:近尾=放完(下一集/结束),中途=重取
+      else if(wdStall>=8){ wdStall=0; doRecover(); }   // alive但播放中持续冻结~24s=源真卡住(点播已去掉ffmpeg读超时,改由此处检测)->从当前位置重取
+      // else(alive且冻结<24s):临时卡顿,先等缓冲自愈,wdStall继续累加到8再重取
     }catch(e){} checking=false;
   }
 }, 3000);
@@ -509,7 +510,16 @@ document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
 
 function startHeartbeat(){ setInterval(()=>{ if(!document.hidden && player) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }
 // 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
-setInterval(()=>{ if(player && !isLiveNow && curFilm && !V.paused){ const a=V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0; fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{}); } }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
+let drainChecking=false;
+setInterval(async ()=>{ if(player && !isLiveNow && curFilm && !V.paused){
+  const a=V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0;
+  fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{});   // 保活 + 上报缓冲量给服务端节流
+  // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
+  if(a < 6 && !recovering && !switching && !drainChecking){ drainChecking=true;
+    try{ const st=await jget('/api/streamstate'); if(!st.feeding) doRecover(); }catch(e){}
+    drainChecking=false;
+  }
+} }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
 window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('/api/leave'); });
 boot();
 </script>

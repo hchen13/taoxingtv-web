@@ -36,7 +36,8 @@ function spawnTranscode(srcPort, isLive){
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
-  const args=['-hide_banner','-loglevel','error', ...rec, '-rw_timeout','30000000',
+  const rwto = isLive ? ['-rw_timeout','30000000'] : [];   // 点播:根本不设读超时。ffmpeg只要连接(页面)还开着就一直活,暂停多久都不自杀;页面关/掉线→res close→teardown回收(见serveStream);真卡死(源挂/App崩)由前端看门狗冻结~24s重取兜底。直播保留30s,与-reconnect配套扛P2P抖动
+  const args=['-hide_banner','-loglevel','error', ...rec, ...rwto,
     '-fflags','+discardcorrupt+genpts','-err_detect','ignore_err',
     ...rate,
     '-i','http://127.0.0.1:'+srcPort+'/',
@@ -126,6 +127,7 @@ let streamMutex=Promise.resolve();
 const FIRST_BYTE_MS = 10000;   // 首字节健康门限:门限内 ffmpeg 无输出=死端口(冷重启/崩溃恢复后首取常见)
 const MAX_START_TRIES = 3;     // 死端口/即时EOF 时内部自动重取,对前端透明
 function serveStream(req, res, playFn, label, isLive, nearEndVod){
+  try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
   streamMutex = streamMutex.then(async()=>{
     const myToken = current.token + 1;
     let aborted=false; const onEarlyClose=()=>{ aborted=true; };
@@ -197,14 +199,14 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
-      ff.stdout.on('data',()=>{ const now=Date.now(); if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活
+      ff.stdout.on('data',()=>{ const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活;lastData=最后出数时刻(供feeding判断:恢复时源还在不在供数)
       if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       ff.stdout.pipe(res);
       // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<56秒续读 -> 缓冲稳定56-60秒,抖动自动回填(读速2x,1x播放约60秒填满)
       let bufPaused=false;
       const throttle = isLive ? null : setInterval(()=>{
         if(current.token!==myToken){ clearInterval(throttle); return; }
-        try{ if(!bufPaused && curBuf>60){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ ff.stdout.resume(); bufPaused=false; } }catch(e){}
+        try{ if(!bufPaused && curBuf>60){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ ff.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
       }, 1000);
       ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
       ff.on('exit',()=>{ if(current.token===myToken) current.ffExited=true; });
@@ -227,7 +229,7 @@ app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:curren
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting, chid:current.chid }));
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着;恢复时前端据此判断要不要重连
 app.get('/api/buf', (req,res)=>{ curBuf=parseFloat(req.query.d)||0; res.json({ok:true}); });  // 前端上报点播缓冲深度
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——
