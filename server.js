@@ -143,7 +143,10 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       await ensureReady();
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
       const hadStream=!!current.port; cleanupCurrent();
-      if(hadStream) await sleep(700);   // 上一路流 stop 后给原生P2P引擎settle,否则快速重取(seek)会拿到立即EOF的死端口
+      // 关键:必须**等**上一路 stop 真正执行完再起新流。之前 stop 是 fire-and-forget,
+      // 切集/重取时它可能在新的 vodStart 之后才到达 -> 把刚起来的新流停掉 ->
+      // 表现为"端口有效但30秒不出数据"(切下一集起不来的真凶)。await 后再 settle。
+      if(hadStream){ try{ if(script) await script.exports.stop(); }catch(e){} await sleep(700); }   // settle:给原生P2P引擎收尾时间,否则快速重取(seek)会拿到立即EOF的死端口
       // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
 
@@ -156,7 +159,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
           badPortCount++;
           console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+MAX_START_TRIES);
           try{ const a=await script.exports.reAuth(); console.log('[auth] 坏端口->温和重授权 chart='+a.chart+' auth='+a.auth); }catch(e){}   // 先重挂表+重授权(原生的补救方式),比 force-stop 整个App温和,能避开churn引发的崩溃
-          try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+          try{ if(script) await script.exports.stop(); }catch(e){}   // await:避免stop晚到把下次重取的新流停掉
           await sleep(800); continue;
         }
         const port=r.port;
@@ -181,7 +184,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         }
         console.log('['+label+'] 端口'+port+' '+(firstByteMs/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
         try{ cand.kill('SIGKILL'); }catch(e){}
-        try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+        try{ if(script) await script.exports.stop(); }catch(e){}   // await:同上,防止晚到的stop杀掉下一次重取
         adb(['forward','--remove','tcp:'+port]);
         await sleep(800);
       }
