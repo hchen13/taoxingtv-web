@@ -76,8 +76,8 @@ async function bootEmulator(){
   if(bootPromise) return bootPromise;
   bootPromise=(async()=>{ state='booting';
     try {
-      if(!emulatorRunning()){ bootStep='启动模拟器(快照恢复)…';
-        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics'],{detached:true,stdio:'ignore'}); p.unref();
+      if(!emulatorRunning()){ bootStep='启动模拟器(全新冷启动)…';
+        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore'}); p.unref();   // -no-snapshot:每次全新冷启动,不加载/保存快照,不继承上次残留状态(登录仍在磁盘userdata里,会自动登录)
         adb(['wait-for-device'],{timeout:120000}); }
       bootStep='等待系统就绪…'; await waitBootCompleted();
       bootStep='启动取流引擎…'; if(!fridaServerUp()){ adbSu('nohup '+FRIDA_BIN+' >/dev/null 2>&1 &'); await sleep(1500); }
