@@ -1,5 +1,5 @@
 📦
-482617 /agent-src.js
+488628 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13658,20 +13658,56 @@ var require_agent_src = __commonJS({
   "agent-src.js"() {
     init_node_globals();
     init_frida_java_bridge();
-    var CB_CLASS = null;
+    var CB_DEX_B64 = "ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA";
     var CB_INST = null;
+    var CB_NATIVE = null;
+    var CB_LOADER = null;
+    var CB_ACT = null;
+    var CB_MODE = "none";
+    var CB_FAIL = "";
     function ensureCB() {
+      if (CB_ACT) return CB_ACT;
       if (CB_INST) return CB_INST;
+      try {
+        const B64 = frida_java_bridge_default.use("android.util.Base64");
+        const BB = frida_java_bridge_default.use("java.nio.ByteBuffer");
+        const IMDCL = frida_java_bridge_default.use("dalvik.system.InMemoryDexClassLoader");
+        const bytes = B64.decode(CB_DEX_B64, 0);
+        CB_LOADER = IMDCL.$new(BB.wrap(bytes), frida_java_bridge_default.use("android.app.ActivityThread").currentApplication().getClassLoader());
+        const f = frida_java_bridge_default.ClassFactory.get(CB_LOADER);
+        CB_NATIVE = f.use("com.txtv.NativeCB");
+        CB_INST = frida_java_bridge_default.retain(frida_java_bridge_default.cast(CB_NATIVE.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
+        CB_MODE = "dex";
+        return CB_INST;
+      } catch (e) {
+        CB_FAIL = "" + (e.message || e);
+      }
       const ITell = frida_java_bridge_default.use("dnet.ITellMessage");
-      CB_CLASS = frida_java_bridge_default.registerClass({
+      const C = frida_java_bridge_default.registerClass({
         name: "com.txtv.Callback",
         implements: [ITell],
         methods: { tellMessage: function(i) {
           if (i === 2 || i === 4 || i >= 100 && i <= 103) send({ tell: i });
         } }
       });
-      CB_INST = CB_CLASS.$new();
+      CB_INST = frida_java_bridge_default.retain(C.$new());
+      CB_MODE = "registerClass(dex\u5931\u8D25:" + CB_FAIL + ")";
       return CB_INST;
+    }
+    try {
+      frida_java_bridge_default.perform(function() {
+        frida_java_bridge_default.scheduleOnMainThread(function() {
+          try {
+            const A = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
+            CB_ACT = frida_java_bridge_default.retain(frida_java_bridge_default.cast(A.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
+            CB_MODE = "activity";
+          } catch (e) {
+            CB_FAIL += "act:" + (e.message || e) + " | ";
+          }
+        });
+      });
+    } catch (e) {
+      CB_FAIL += "actsched:" + (e.message || e) + " | ";
     }
     function dumpList(listVal, ChannelCls) {
       if (!listVal) return [];
@@ -13850,6 +13886,64 @@ var require_agent_src = __commonJS({
             resolve({ account: acct, activated: acct.length > 0 && ch > 0, channels: ch });
           } catch (e) {
             reject("" + (e.stack || e));
+          }
+        }));
+      },
+      // 温和重授权:复刻原生 HomeActivity.doAuth() 的 icChart(挂表) -> icAuth(设备授权)。
+      // 为什么需要:普通冷启动(monkey拉起)后 activatedTime 一直是0,vodStart/playbackStart 直接返回
+      // -1000(hint_master_or_option_error=没挂表/没授权)。原生靠首页UI流程跑这两步;我们无头绕过了UI,
+      // 所以必须自己调。这比 am force-stop 整个App温和得多(force-stop+快速重启本身就是崩溃源)。
+      reAuth: function() {
+        return new Promise((resolve) => frida_java_bridge_default.perform(function() {
+          const out = { chart: null, auth: null, master: null, err: null };
+          try {
+            const VC = frida_java_bridge_default.use("dnet.VideoClient");
+            const CD = frida_java_bridge_default.use("com.wys.iptvgo.coredata.CoreData");
+            const master = "" + CD.master.value;
+            out.master = master;
+            try {
+              out.chart = VC.icChart(master);
+            } catch (e) {
+              out.err = "chart:" + (e.message || e);
+            }
+            const c = master.indexOf(":");
+            const ip = master.substring(0, c), port = parseInt(master.substring(c + 1), 10);
+            const lang = "" + CD.LANGS.value[CD.langIndex.value];
+            const url = CD.AUTH_URL.value + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=" + lang + "&ver=408";
+            const ctx = frida_java_bridge_default.use("android.app.ActivityThread").currentApplication();
+            CD.activatedTime.value = 0;
+            for (let i = 0; i < 2; i++) {
+              try {
+                out.auth = VC.icAuth(ctx.getAssets(), url, ip, port, ip, port, ip, port);
+              } catch (e) {
+                out.err = "auth:" + (e.message || e);
+                break;
+              }
+              if (out.auth === 0) {
+                CD.activatedTime.value = frida_java_bridge_default.use("java.lang.System").currentTimeMillis();
+                break;
+              }
+            }
+          } catch (e) {
+            out.err = "" + (e.message || e);
+          }
+          resolve(out);
+        }));
+      },
+      // 轮询原生回调状态(替代从原生线程 send() 回JS:那条路径正是SIGSEGV来源)。reset=true 时清零,供每次播放开始前重置
+      pollTell: function(reset) {
+        return new Promise((resolve) => frida_java_bridge_default.perform(function() {
+          try {
+            if (!CB_NATIVE) return resolve({ mode: CB_MODE, fail: CB_FAIL, last: 0, ended: 0, count: 0 });
+            const r = { mode: CB_MODE, fail: CB_FAIL, last: CB_NATIVE.last.value, ended: CB_NATIVE.endedFlag.value, count: CB_NATIVE.count.value };
+            if (reset) {
+              CB_NATIVE.last.value = 0;
+              CB_NATIVE.endedFlag.value = 0;
+              CB_NATIVE.count.value = 0;
+            }
+            resolve(r);
+          } catch (e) {
+            resolve({ mode: CB_MODE, err: "" + (e.message || e) });
           }
         }));
       },

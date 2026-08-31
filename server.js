@@ -91,7 +91,11 @@ async function bootEmulator(){
       if(coldLaunch){ bootStep='等待频道数据就绪…';   // 就绪门:等频道加载完成(icChart挂表成功的信号)。注:activatedTime(icAuth设备授权)在无头环境永远为0——那是HomeActivity的UI流程,我们绕过了界面直接Frida调vodStart,故不能作为门条件(实测等3分钟仍为0)
         let rdy={};
         for(let i=0;i<20;i++){ try{ rdy=await script.exports.engineReady(); }catch(e){ rdy={}; } if(rdy && rdy.channels>0) break; await sleep(1500); }
-        console.log('[engine] 频道就绪 ch='+(rdy.channels||0)+' activatedTime='+(rdy.activatedTime||0)+(rdy.activatedTime>0?'':' (未走UI授权,属预期)')); }
+        console.log('[engine] 频道就绪 ch='+(rdy.channels||0));
+        // 冷启动后必须自己挂表+授权:原生靠首页UI流程跑 icChart/icAuth,我们无头绕过了UI,
+        // 不做这步则 vodStart/playbackStart 一律返回 -1000(没授权),表现为"死端口/取不到流"
+        bootStep='挂表授权…';
+        try{ const a=await script.exports.reAuth(); console.log('[auth] 冷启动授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:'')); }catch(e){ console.log('[auth] 冷启动授权失败',e&&e.message); } }
       state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
     } catch(e){ state='off'; bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
@@ -148,9 +152,10 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
         const r = await playFn();
         if(aborted) break;
-        if(!r || !r.port || r.port<=0){   // 原生 play 直接失败(如P2P核心没准备好/卡死,返回-1000等)
+        if(!r || !r.port || r.port<=0){   // -1000 = 没挂表/没授权(hint_master_or_option_error),不是内容问题
           badPortCount++;
           console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+MAX_START_TRIES);
+          try{ const a=await script.exports.reAuth(); console.log('[auth] 坏端口->温和重授权 chart='+a.chart+' auth='+a.auth); }catch(e){}   // 先重挂表+重授权(原生的补救方式),比 force-stop 整个App温和,能避开churn引发的崩溃
           try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
           await sleep(800); continue;
         }
