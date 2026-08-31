@@ -189,9 +189,9 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         await sleep(800);
       }
 
-      if(aborted || res.writableEnded || req.destroyed){   // 客户端在启动期就走了
+      if(aborted || res.writableEnded || req.destroyed){   // 客户端在启动期就走了(seek/切集时前端换流走的正是这条)
         if(ff){ try{ff.kill('SIGKILL');}catch(e){} }
-        try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
+        try{ if(script) await script.exports.stop(); }catch(e){}   // 必须await:否则这个stop会晚到,把用户下一次seek刚起的流停掉(端口有效却无数据)
         if(myPort) adb(['forward','--remove','tcp:'+myPort]);
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
         return;

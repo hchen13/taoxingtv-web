@@ -347,7 +347,7 @@ $('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(r
 function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
 function toggleSide(){ const app=document.querySelector('.app'); const c=app.classList.toggle('collapsed'); $('sideTgl').textContent=c?'›':'‹'; try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} }
 try{ if(localStorage.getItem('txtv_side')==='1'){ document.querySelector('.app').classList.add('collapsed'); $('sideTgl').textContent='›'; } }catch(e){}
-function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
   if(player){try{player.destroy()}catch(e){}player=null;}
@@ -441,6 +441,9 @@ document.addEventListener('keydown',e=>{
 //    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
 let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1;
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
+// 用户主动换流(seek/切集/换台)时清零故障计数:这些不是"播放故障",不该累加到上限去弹"播放中断"。
+// (只在非恢复流程中清零,否则恢复失败的循环会永远清零、失去上限保护)
+function userAction(){ if(!recovering){ recoverTimes=0; lastRecover=0; } }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
