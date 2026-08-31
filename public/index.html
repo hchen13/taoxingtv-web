@@ -173,14 +173,14 @@ const V=$('v'), STAGE=$('stage');
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
-async function boot(){ startWakeProg(); try{
+async function bootOnce(){ startWakeProg();
   let st=await jget('/api/status');
   if(st.state!=='ready'){ await fetch('/api/wake',{method:'POST'});
     let ok=false;
     for(let i=0;i<90;i++){ await new Promise(r=>setTimeout(r,1200)); try{st=await jget('/api/status');}catch(e){continue;}
       wakeStep=st.step||''; $('wstep').textContent=st.step||'正在唤醒引擎…';
-      if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')){stopWakeProg(); $('wstep').textContent=st.step;return;} }
-    if(!ok){ stopWakeProg(); $('wstep').textContent='唤醒超时，请刷新重试'; return; } }
+      if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')) throw new Error(st.step); }
+    if(!ok) throw new Error('唤醒超时'); }
   stopWakeProg(); setWakeProg(92); $('wstep').textContent='检查登录…';
   let ls; try{ ls=await jget('/api/loginstate'); }catch(e){ ls={loggedIn:false,hasSavedCreds:false}; }
   if(!ls.loggedIn){
@@ -188,11 +188,16 @@ async function boot(){ startWakeProg(); try{
     else { showLogin(''); return; }
   }
   await afterLogin();
-  }catch(e){ $('wstep').textContent='连接失败: '+(e.message||e)+'（请刷新）'; }
+}
+// 刷新后"出节目"是唯一可接受结果:任何瞬时失败(冷启动刚就绪被空闲回收抢到、网络抖动、引擎未就位)都自动重连,不再一失败就停在"请刷新"
+let bootTries=0;
+async function boot(){ try{ await bootOnce(); bootTries=0; }
+  catch(e){ if(bootTries++ < 8){ $('wstep').textContent='引擎未就绪，重连中…（'+bootTries+'）'; setTimeout(boot,2000); }
+    else { stopWakeProg(); $('wstep').textContent='多次重连失败，请刷新重试'; } }
 }
 async function afterLogin(){
   const d=await jget('/api/channels');
-  if(d.error){$('wstep').textContent='引擎未就位: '+d.error;return;}
+  if(d.error) throw new Error('引擎未就位: '+d.error);
   channels=d.live||[]; window.expiredTime=d.expiredTime||'';
   stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore();
 }

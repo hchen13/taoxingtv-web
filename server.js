@@ -88,7 +88,7 @@ async function bootEmulator(){
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
       if(coldLaunch){ bootStep='等待P2P核心初始化…'; await sleep(12000); }  // 冷启动(首启/崩溃恢复)后P2P核心需时间,否则vodPlay返回502
       bootStep='注入引擎…'; await attach();
-      state='ready'; bootStep='就绪'; console.log('[engine] ready');
+      state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
     } catch(e){ state='off'; bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
   })(); return bootPromise;
