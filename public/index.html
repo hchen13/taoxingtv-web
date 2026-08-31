@@ -420,7 +420,7 @@ function seekBy(delta){ if(isLiveNow||!curFilm||!vodDur)return; flashUI();
   const base=(seekTarget!=null)?seekTarget:(vodBase+V.currentTime);
   seekTarget=Math.max(0,Math.min(vodDur-1,base+delta));
   dragging=true; $('seek').value=seekTarget; $('curT').textContent=fmt(seekTarget); updateSeekBar();  // 立即视觉反馈,先不取流
-  clearTimeout(seekTimer); seekTimer=setTimeout(()=>{ const t=seekTarget; seekTarget=null; dragging=false; commitSeek(t); },280); }
+  clearTimeout(seekTimer); seekTimer=setTimeout(()=>{ const t=seekTarget; seekTarget=null; dragging=false; commitSeek(t); },800); }   // 800ms:连按方向键合并成停手后的一次重取。每次重取都是一路全新P2P取流,高频start/stop会毒死原生引擎,所以宁可晚一点也不要churn
 // —— 键盘 ——
 document.addEventListener('keydown',e=>{
   const t=document.activeElement; if(t&&(t.tagName==='INPUT'||t.tagName==='SELECT'||t.tagName==='TEXTAREA'))return;
@@ -452,14 +452,15 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime) >= vodDur*0.98){ atEnd(); return; }   // 到片尾=真结束,下一集;其余一律当故障重取续播
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
   recoverPos = isLiveNow?0:(vodBase+V.currentTime);
-  if(recoverTimes>5){   // 反复重取都失败=真出问题了,老实告诉用户,绝不拿"可能是放完了"来搪塞
+  if(recoverTimes>14){   // 退避重试约2分钟仍不行才放弃(服务端遇到坏引擎会冷重启自愈,约需40-60秒,必须等得起)
     $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
-  recovering=true; $('load').classList.add('show'); $('loadtx').textContent='恢复中…';
+  recovering=true; $('load').classList.add('show');
+  $('loadtx').textContent = recoverTimes<=3 ? '恢复中…' : '引擎恢复中，请稍候…';
   const pos = isLiveNow ? 0 : (vodBase + V.currentTime);
   recoverTimer=setTimeout(()=>{ recoverTimer=null; try{
     if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
     else if(curFilm){ playEpisode(vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0); }
-  }catch(e){} recovering=false; }, 600);
+  }catch(e){} recovering=false; }, recoverTimes<=2?600:Math.min(10000,600*Math.pow(2,recoverTimes-2)));   // 指数退避:别在引擎自愈期间高频重试制造新churn
 }
 V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
 V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。

@@ -132,16 +132,22 @@ setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>I
 
 // ---------- 取流(直播/点播共用),token化+串行化 ----------
 let streamMutex=Promise.resolve();
+let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请求,只有最新的才该触达原生。
+                // 旧请求若也去 vodStart 再被抛弃,就是"起流->没出数据->停掉"的高频churn,实测6次就能毒死P2P引擎
 const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
 function serveStream(req, res, playFn, label, isLive, nearEndVod){
+  const mySeq = ++reqSeq;   // 同步取号(在排队之前),后来者会让先来者作废
   try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
   streamMutex = streamMutex.then(async()=>{
     const myToken = current.token + 1;
     let aborted=false; const onEarlyClose=()=>{ aborted=true; };
     req.on('close', onEarlyClose);
     try {
+      if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 已被更新请求取代 且 客户端确实已走(seek换流):直接放弃,绝不去动原生引擎。
+      // 注意必须带"客户端已走"这个条件:只看序号会导致请求比处理快时人人都被判陈旧->谁都不执行的死锁
       await ensureReady();
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
+      if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 等待期间又被取代且客户端已走,同上
       const hadStream=!!current.port; cleanupCurrent();
       // 关键:必须**等**上一路 stop 真正执行完再起新流。之前 stop 是 fire-and-forget,
       // 切集/重取时它可能在新的 vodStart 之后才到达 -> 把刚起来的新流停掉 ->
@@ -151,7 +157,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
 
       const firstByteMs = isLive ? 12000 : 30000;   // 首字节耐心:点播给 P2P 缓冲 30s(接近原生 MediaPlayer 的耐心),不再 10s 就判死端口拆流重取——这是 churn 主因之一
-      let ff=null, myPort=0, buffered=null, badPortCount=0;
+      let ff=null, myPort=0, buffered=null, badPortCount=0, deadPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
         const r = await playFn();
         if(aborted) break;
@@ -182,6 +188,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
           if(attempt>1) console.log('['+label+'] 第'+attempt+'次取流出数据(前'+(attempt-1)+'次死端口)');
           break;
         }
+        deadPortCount++;
         console.log('['+label+'] 端口'+port+' '+(firstByteMs/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
         try{ cand.kill('SIGKILL'); }catch(e){}
         try{ if(script) await script.exports.stop(); }catch(e){}   // await:同上,防止晚到的stop杀掉下一次重取
@@ -194,11 +201,17 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         try{ if(script) await script.exports.stop(); }catch(e){}   // 必须await:否则这个stop会晚到,把用户下一次seek刚起的流停掉(端口有效却无数据)
         if(myPort) adb(['forward','--remove','tcp:'+myPort]);
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+        // 前端等不及先走了,但本次确实遇到过死端口=引擎已坏。必须在这里也自愈,否则前端反复重试、
+        // 每次都走abort分支跳过自愈 -> 引擎一直毒着 -> 用户看到"播放中断"。正常seek不会有死端口,不会误触发
+        if(deadPortCount>0 && state==='ready' && !nearEndVod){
+          console.log('['+label+'] 客户端已放弃但出现死端口 -> 触发冷重启App自愈');
+          needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+        }
         return;
       }
       if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
-        if(badPortCount>=MAX_START_TRIES && state==='ready' && !nearEndVod){   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App自愈。但点播接近片尾的坏端口多半是"内容真结束",不算卡死,不冷重启(前端会判作播完跳下一集)
+        if(state==='ready' && !nearEndVod){   // 坏端口(-1000)或连续死端口(端口有效却不出数据)都说明P2P引擎已坏,冷重启自愈   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App自愈。但点播接近片尾的坏端口多半是"内容真结束",不算卡死,不冷重启(前端会判作播完跳下一集)
           console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
           needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
         }
