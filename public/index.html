@@ -394,7 +394,7 @@ function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   // 蓝=已播放 / 白=已缓冲未播 / 灰=未缓冲
   $('seek').style.background='linear-gradient(to right, var(--acc) 0 '+played+'%, rgba(255,255,255,.9) '+played+'% '+buf+'%, rgba(255,255,255,.28) '+buf+'% 100%)'; }
 V.addEventListener('progress',updateSeekBar);
-V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(lastRecoverPos>=0 && pos>lastRecoverPos+10) lastRecoverPos=-1;  // 播放往前推进了 => 上次断流不是真结尾,清掉标记
+V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(lastRecoverPos>=0 && pos>lastRecoverPos+10){ lastRecoverPos=-1; recoverTimes=0; }  // 播放真往前推进了 => 上次断流不是真结尾,清标记+重置恢复计数(循环重取因为没进展,计数不会被清,最终触发上限停下)
   $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
   const now=Date.now(); if(now-lastSave>3000){ lastSave=now; saveState(); } } });   // 节流:播放中每3秒真正存一次进度(原来是防抖,播放中永不触发)
 $('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
@@ -458,6 +458,9 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   }catch(e){} recovering=false; }, 600);
 }
 V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
+V.addEventListener('ended', ()=>{   // 点播"结束":到真片尾(>=98%)才下一集;中途就结束=源提前EOF/断流,从当前位置重取续播,别锁死在原地循环那几秒
+  if(isLiveNow||!curFilm||!vodDur||recovering||switching) return;
+  if((vodBase+V.currentTime) >= vodDur*0.98) atEnd(); else doRecover(); });
 // 卡顿看门狗:进度冻结且无数据(readyState<3)约12秒 -> 查 streamstate 决定怎么办
 let wdLast=0, wdStall=0, checking=false;
 setInterval(async ()=>{
@@ -481,7 +484,7 @@ setInterval(async ()=>{
   }
 }, 3000);
 V.addEventListener('waiting', ()=>{ if(player&&!recovering){ $('loadtx').textContent='缓冲中…'; $('load').classList.add('show'); } });
-V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); recoverTimes=0; wdStall=0; });
+V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); wdStall=0; });   // 不在这清 recoverTimes(会被"每次只播几秒的重取循环"绕过);改由 timeupdate 按真实进展清
 
 // —— 人声增强(Web Audio 动态范围压缩) ——
 let audioCtx=null, srcNode=null, compNode=null, gainNode=null, audioReady=false;
