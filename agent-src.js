@@ -122,6 +122,18 @@ rpc.exports = {
       } catch(e){ reject('' + (e.stack||e)); }
     }));
   },
+  // 引擎真实就绪判据(原生:icChart挂表+icAuth授权成功后 activatedTime=毫秒时间戳;默认0/失败-1)。activatedTime>0 且频道已加载 才算引擎挂表+授权完成、可安全 vodStart。替代冷启动盲等12s——盲等常常还没授权就播,vodStart直接给死端口/-1000
+  engineReady: function () {
+    return new Promise((resolve) => Java.perform(function () {
+      try {
+        const CD = Java.use('com.newvod.coredata.CoreData');
+        const ChD = Java.use('com.wys.iptvgo.coredata.ChannelData');
+        let at = 0; try { at = parseInt(''+CD.activatedTime.value,10)||0; } catch(e){}
+        let ch = 0; try { ch = ChD.listChannel.value.size(); } catch(e){}
+        resolve({ activated: at>0, activatedTime: at, channels: ch });
+      } catch(e){ resolve({ activated:false, activatedTime:0, channels:0, err:''+(e.message||e) }); }
+    }));
+  },
   readCreds: function () {
     return new Promise((resolve, reject) => Java.perform(function () {
       try { const CD = Java.use('com.newvod.coredata.CoreData');

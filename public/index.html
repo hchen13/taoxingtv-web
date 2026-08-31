@@ -447,13 +447,12 @@ function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自�
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
   if(!isLiveNow && curFilm && vodDur){ const vpos=vodBase+V.currentTime;
-    if(vpos >= vodDur*0.98){ lastRecoverPos=-1; atEnd(); return; }                                   // 已到98%,基本到头 -> 下一集
-    if(vpos >= vodDur*0.85 && lastRecoverPos>=0 && vpos <= lastRecoverPos+4){ lastRecoverPos=-1; atEnd(); return; }  // 片尾区重取后没往前(真没内容了) -> 下一集
+    if(vpos >= vodDur*0.98){ lastRecoverPos=-1; atEnd(); return; }                                   // 只有真到98%(片尾)才跳集;90-98%的源故障(死端口/崩溃)一律重取续播,绝不提前跳集——与看门狗nearEnd(0.98)一致。真结束由原生tell==2(看门狗st.ended)兜底
     lastRecoverPos = vpos;                                                                            // 记下这次断流位置;重取后若没进展就判真结束
   } else { lastRecoverPos=-1; }
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
   if(recoverTimes>5){
-    if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime)>=vodDur*0.85){ recoverTimes=0; lastRecoverPos=-1; atEnd(); return; }  // 片尾区反复取不到=真到头,自动下一集(不弹"播放中断")
+    if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime)>=vodDur*0.98){ recoverTimes=0; lastRecoverPos=-1; atEnd(); return; }  // 只有真到98%反复取不到才自动下一集;90-98%源故障=弹"播放中断,请重选",绝不误跳集
     $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
   recovering=true; $('load').classList.add('show'); $('loadtx').textContent='恢复中…';
   const pos = isLiveNow ? 0 : (vodBase + V.currentTime);

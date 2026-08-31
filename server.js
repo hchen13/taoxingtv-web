@@ -86,8 +86,12 @@ async function bootEmulator(){
       let coldLaunch=false;
       if(!appRunning()){ adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']); coldLaunch=true; }
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
-      if(coldLaunch){ bootStep='等待P2P核心初始化…'; await sleep(12000); }  // 冷启动(首启/崩溃恢复)后P2P核心需时间,否则vodPlay返回502
+      if(coldLaunch){ bootStep='等待应用启动…'; await sleep(4000); }  // 短暂等应用进程起来再注入,随后按真实信号放行(不再盲等12s)
       bootStep='注入引擎…'; await attach();
+      if(coldLaunch){ bootStep='等待频道数据就绪…';   // 就绪门:等频道加载完成(icChart挂表成功的信号)。注:activatedTime(icAuth设备授权)在无头环境永远为0——那是HomeActivity的UI流程,我们绕过了界面直接Frida调vodStart,故不能作为门条件(实测等3分钟仍为0)
+        let rdy={};
+        for(let i=0;i<20;i++){ try{ rdy=await script.exports.engineReady(); }catch(e){ rdy={}; } if(rdy && rdy.channels>0) break; await sleep(1500); }
+        console.log('[engine] 频道就绪 ch='+(rdy.channels||0)+' activatedTime='+(rdy.activatedTime||0)+(rdy.activatedTime>0?'':' (未走UI授权,属预期)')); }
       state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
     } catch(e){ state='off'; bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
@@ -124,8 +128,7 @@ setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>I
 
 // ---------- 取流(直播/点播共用),token化+串行化 ----------
 let streamMutex=Promise.resolve();
-const FIRST_BYTE_MS = 10000;   // 首字节健康门限:门限内 ffmpeg 无输出=死端口(冷重启/崩溃恢复后首取常见)
-const MAX_START_TRIES = 3;     // 死端口/即时EOF 时内部自动重取,对前端透明
+const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
 function serveStream(req, res, playFn, label, isLive, nearEndVod){
   try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
   streamMutex = streamMutex.then(async()=>{
@@ -140,6 +143,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
 
+      const firstByteMs = isLive ? 12000 : 30000;   // 首字节耐心:点播给 P2P 缓冲 30s(接近原生 MediaPlayer 的耐心),不再 10s 就判死端口拆流重取——这是 churn 主因之一
       let ff=null, myPort=0, buffered=null, badPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
         const r = await playFn();
@@ -156,7 +160,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
         const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
         const gotData = await new Promise(resolve=>{
-          timer=setTimeout(()=>resolve(false), FIRST_BYTE_MS);
+          timer=setTimeout(()=>resolve(false), firstByteMs);
           onFirst=()=>resolve(true); onCandExit=()=>resolve(false);
           cand.stdout.on('data', collect);
           cand.stdout.once('data', onFirst);
@@ -170,7 +174,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
           if(attempt>1) console.log('['+label+'] 第'+attempt+'次取流出数据(前'+(attempt-1)+'次死端口)');
           break;
         }
-        console.log('['+label+'] 端口'+port+' '+(FIRST_BYTE_MS/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
+        console.log('['+label+'] 端口'+port+' '+(firstByteMs/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
         try{ cand.kill('SIGKILL'); }catch(e){}
         try{ if(script) script.exports.stop().catch(()=>{}); }catch(e){}
         adb(['forward','--remove','tcp:'+port]);
