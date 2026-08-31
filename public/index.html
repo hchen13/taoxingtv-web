@@ -94,7 +94,7 @@
   #wake.hide{display:none}
   #wake .logo2{font-size:34px;font-weight:800}#wake .step{color:var(--dim);font-size:14px}
   #wake .prog{width:260px;height:4px;background:var(--panel2);border-radius:2px;overflow:hidden}
-  #wake .prog i{display:block;height:100%;width:30%;background:var(--acc);border-radius:2px;animation:sl 1.2s ease-in-out infinite}
+  #wake .prog i{display:block;height:100%;width:2%;background:var(--acc);border-radius:2px;transition:width .45s ease}
   #wakeProg{display:flex;flex-direction:column;align-items:center;gap:16px}
   #loginBox{display:flex;flex-direction:column;gap:12px;width:290px}
   #loginBox .lt{font-size:15px;color:var(--txt);text-align:center;margin-bottom:2px}
@@ -162,23 +162,29 @@
 let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, filmsCache={};
 let curFilm=null, curEps=[], curEpIdx=0, vodBase=0, vodDur=0, dragging=false, curSpeed=1, isLiveNow=false, curPct=0, switching=false;
 const $=id=>document.getElementById(id);
+// —— 唤醒进度条(按启动步骤+耗时填充,不显示数字) ——
+let wakeStart=Date.now(), wakeStep='', wakeIv=null;
+function setWakeProg(p){ const el=document.querySelector('#wake .prog i'); if(el) el.style.width=Math.max(2,Math.min(100,p))+'%'; }
+function bootPct(){ const map=[['启动模拟器',8],['系统就绪',35],['取流引擎',50],['冷重启',55],['P2P',68],['注入',86],['就绪',90]]; let p=5; if(wakeStep)for(const kv of map){ if(wakeStep.indexOf(kv[0])>=0){ p=kv[1]; break; } } return Math.max(p, Math.min(88,(Date.now()-wakeStart)/46000*100)); }  // 步骤里程碑 与 按~46s匀速爬 取大者,总在动
+function startWakeProg(){ wakeStart=Date.now(); wakeStep=''; if(wakeIv)clearInterval(wakeIv); wakeIv=setInterval(()=>setWakeProg(bootPct()),300); }
+function stopWakeProg(){ if(wakeIv){clearInterval(wakeIv);wakeIv=null;} }
 const jget=async(u,o)=>{ const r=await fetch(u,o); if(!r.ok){ let m=''; try{m=(await r.json()).error||'';}catch(e){} throw new Error('HTTP '+r.status+(m?': '+m:'')); } return r.json(); };
 const V=$('v'), STAGE=$('stage');
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
-async function boot(){ try{
+async function boot(){ startWakeProg(); try{
   let st=await jget('/api/status');
   if(st.state!=='ready'){ await fetch('/api/wake',{method:'POST'});
     let ok=false;
     for(let i=0;i<90;i++){ await new Promise(r=>setTimeout(r,1200)); try{st=await jget('/api/status');}catch(e){continue;}
-      $('wstep').textContent=st.step||'正在唤醒引擎…';
-      if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')){$('wstep').textContent=st.step;return;} }
-    if(!ok){ $('wstep').textContent='唤醒超时，请刷新重试'; return; } }
-  $('wstep').textContent='检查登录…';
+      wakeStep=st.step||''; $('wstep').textContent=st.step||'正在唤醒引擎…';
+      if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')){stopWakeProg(); $('wstep').textContent=st.step;return;} }
+    if(!ok){ stopWakeProg(); $('wstep').textContent='唤醒超时，请刷新重试'; return; } }
+  stopWakeProg(); setWakeProg(92); $('wstep').textContent='检查登录…';
   let ls; try{ ls=await jget('/api/loginstate'); }catch(e){ ls={loggedIn:false,hasSavedCreds:false}; }
   if(!ls.loggedIn){
-    if(ls.hasSavedCreds){ $('wstep').textContent='自动登录中…'; const r=await loginRequest({useSaved:true}); if(!r.ok){ showLogin(r.error||'自动登录失败，请重新登录'); return; } }
+    if(ls.hasSavedCreds){ $('wstep').textContent='自动登录中…'; setWakeProg(95); const r=await loginRequest({useSaved:true}); if(!r.ok){ showLogin(r.error||'自动登录失败，请重新登录'); return; } }
     else { showLogin(''); return; }
   }
   await afterLogin();
@@ -188,7 +194,7 @@ async function afterLogin(){
   const d=await jget('/api/channels');
   if(d.error){$('wstep').textContent='引擎未就位: '+d.error;return;}
   channels=d.live||[]; window.expiredTime=d.expiredTime||'';
-  $('wake').classList.add('hide'); startHeartbeat(); restore();
+  stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore();
 }
 function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; }
 async function loginRequest(body){
