@@ -358,7 +358,8 @@ function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; windo
      // 只在缓冲>30秒时用1.08x轻微追平(liveSync平滑不硬跳)。点播 liveSync:false 不受影响。
      liveBufferLatencyChasing:false,
      liveSync:isLive, liveSyncMaxLatency:isLive?30:1.2, liveSyncTargetLatency:isLive?18:0.8, liveSyncPlaybackRate:1.08,
-     lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
+     lazyLoad:false,   // 必须关:开着的话缓冲超过30秒 mpegts 会主动断开网络连接(暂停时缓冲正好很足) -> 服务端拆流 -> 恢复时只能重新请求 -> 黑屏重缓冲。缓冲量由服务端节流(60秒)控制,不需要它
+      stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
   player.attachMediaElement(V); player.load();
   // 点播起播/跳进度:先攒够预缓冲再播。直接在canplay就播(那时才1-2秒缓冲)会"放几秒就卡",
   // 卡了又触发恢复重取,表现就是"播几秒->缓冲->回退->再播几秒"。恢复流程自带更大的余量,不覆盖它。
@@ -561,7 +562,7 @@ setInterval(()=>{
 }, 500);
 
 let drainChecking=false, dryStart=0;   // dryStart:缓冲见底且源不出数据的起始时刻。短暂不出数据是P2P常态,必须等,不能立刻重取(重取=churn=把引擎搞坏)
-setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pendingResumeAt)){
+setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也要上报缓冲量,否则服务端不知情会一直喂(实测暂停5分钟涨到103秒,占内存且可能撞MSE上限)
   const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
   // 恢复等待期间按"目标位置之后还有多少"上报(否则服务端会以为缓冲已满而停止供数,永远等不到目标)
   const a = pendingResumeAt ? Math.max(0, bufEndAbs-pendingResumeAt)
@@ -569,7 +570,7 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pend
   fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{});   // 保活 + 上报缓冲量给服务端节流
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
   if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
-  if(a < 6 && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;
+  if(a < 6 && !V.paused && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;   // 暂停时不做见底判断(不消耗缓冲,也不该重取)
     try{ const st=await jget('/api/streamstate');
       if(!st.alive){ dryStart=0; doRecover(); }                       // 流真的死了(ffmpeg没了)->才重取
       else if(!st.feeding){                                           // 源暂时没出数据:这在P2P很常见,原生就是转圈等
