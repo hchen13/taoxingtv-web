@@ -360,10 +360,12 @@ function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; windo
      liveSync:isLive, liveSyncMaxLatency:isLive?30:1.2, liveSyncTargetLatency:isLive?18:0.8, liveSyncPlaybackRate:1.08,
      lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
   player.attachMediaElement(V); player.load();
-  V.oncanplay=()=>{$('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
+  V.oncanplay=()=>{ if(!pendingResumeAt) $('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
     if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
   player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b); });
-  V.play().catch(()=>{}); flashUI();
+  if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
+  else V.play().catch(()=>{});
+  flashUI();
 }
 // —— 控件显隐 ——
 let uiTimer=null;
@@ -439,11 +441,15 @@ document.addEventListener('keydown',e=>{
 
 // —— 恢复策略(对齐原生App):临时卡顿不重取,让它自己缓冲恢复;
 //    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
-let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1;
+let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1, fromRecovery=false;   // fromRecovery:本次换流是恢复流程自己发起的(而非用户操作)
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
 // 用户主动换流(seek/切集/换台)时清零故障计数:这些不是"播放故障",不该累加到上限去弹"播放中断"。
 // (只在非恢复流程中清零,否则恢复失败的循环会永远清零、失去上限保护)
-function userAction(){ if(!recovering){ recoverTimes=0; lastRecover=0; } }
+// 用户自己点/拖/切集:清空故障计数,并取消未完成的恢复等待和恢复目标——一切以用户最新意图为准。
+// 判据必须是"这次换流是不是恢复流程发起的"(fromRecovery),不能用 recovering:
+// 否则用户在恢复退避期间拖进度会被旧的"最远位置"顶掉(比如先拖到远处又拖回近处,会被强行拉回远处)
+function userAction(){ if(fromRecovery) return; recoverTimes=0; lastRecover=0; pendingResumeAt=0;
+  if(recoverTimer){ clearTimeout(recoverTimer); recoverTimer=null; } recovering=false; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
@@ -451,16 +457,21 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   if(recovering||!player) return;
   if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime) >= vodDur*0.98){ atEnd(); return; }   // 到片尾=真结束,下一集;其余一律当故障重取续播
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
-  recoverPos = isLiveNow?0:(vodBase+V.currentTime);
+  recoverPos = isLiveNow?0:Math.max(pendingResumeAt||0, vodBase+V.currentTime);
   if(recoverTimes>14){   // 退避重试约2分钟仍不行才放弃(服务端遇到坏引擎会冷重启自愈,约需40-60秒,必须等得起)
     $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
   recovering=true; $('load').classList.add('show');
   $('loadtx').textContent = recoverTimes<=3 ? '恢复中…' : '引擎恢复中，请稍候…';
-  const pos = isLiveNow ? 0 : (vodBase + V.currentTime);
-  recoverTimer=setTimeout(()=>{ recoverTimer=null; try{
+  // 关键:恢复等待期间视频停在流开头,若此时又断一次,不能用当前位置当目标(会倒退丢掉原中断点),
+  // 必须保留最远的已看位置,否则反复恢复会一次次往回退
+  const pos = isLiveNow ? 0 : Math.max(pendingResumeAt||0, vodBase + V.currentTime);
+  recoverTimer=setTimeout(()=>{ recoverTimer=null; fromRecovery=true; try{
     if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
-    else if(curFilm){ playEpisode(vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0); }
-  }catch(e){} recovering=false; }, recoverTimes<=2?600:Math.min(10000,600*Math.pow(2,recoverTimes-2)));   // 指数退避:别在引擎自愈期间高频重试制造新churn
+    else if(curFilm){ const pct=vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0;
+      const newBase=vodDur?Math.floor(pct/100*vodDur):0;
+      pendingResumeAt = (pos-newBase>3) ? pos : 0;   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
+      playEpisode(pct); }
+  }catch(e){} fromRecovery=false; recovering=false; }, recoverTimes<=2?600:Math.min(10000,600*Math.pow(2,recoverTimes-2)));   // 指数退避:别在引擎自愈期间高频重试制造新churn
 }
 V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
 V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。
@@ -474,6 +485,7 @@ setInterval(async ()=>{
   if(!player||recovering){ wdStall=0; wdLast=V.currentTime; return; }
   const absPos = vodBase + V.currentTime;
   const nearEnd = curFilm && vodDur && absPos >= vodDur*0.98;   // 只有到98%才算"基本到头";90-98%的断流先重取续播(见doRecover),不再直接跳下一集
+  if(pendingResumeAt){ wdStall=0; wdLast=V.currentTime; return; }   // 恢复等待中(故意暂停攒缓冲),由等待器负责
   if(V.paused){   // 暂停:只在"停在缓冲末尾且近片尾+流已断"时判真结束(否则是用户主动暂停,不动)
     const bufEnd = V.buffered.length ? V.buffered.end(V.buffered.length-1) : 0;
     if(nearEnd && curFilm && V.currentTime>=bufEnd-1.0 && !checking){ checking=true;
@@ -517,12 +529,39 @@ document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
 
 function startHeartbeat(){ setInterval(()=>{ if(!document.hidden && player) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }
 // 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
+// —— 恢复不回头看 ——
+// 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,
+// 等缓冲越过中断位置、并且再往后攒够 RESUME_MARGIN 秒余量,才跳回中断处继续播。
+// 余量是关键:缓冲一到就播往往刚播就见底->又断->又回到那个百分点->死循环。
+let pendingResumeAt=0, resumeLastBuf=0, resumeLastGrow=0;
+const RESUME_MARGIN=12;
+setInterval(()=>{
+  if(!pendingResumeAt || !player || isLiveNow || !curFilm) return;
+  const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
+  // 缓冲刚越过中断位置就先跳过去(此时已看过的部分变成"背后",会被自动回收,避免缓冲无限膨胀)
+  if(bufEndAbs >= pendingResumeAt && (vodBase+V.currentTime) < pendingResumeAt-0.5){
+    try{ V.currentTime = pendingResumeAt - vodBase; }catch(e){}
+  }
+  const ahead = bufEndAbs - pendingResumeAt;
+  if(ahead >= RESUME_MARGIN){   // 余量够了才真正开始播
+    pendingResumeAt=0; $('load').classList.remove('show'); V.playbackRate=curSpeed; V.play().catch(()=>{}); return;
+  }
+  $('loadtx').textContent = ahead>=0 ? ('恢复中…缓冲 '+Math.floor(ahead)+'/'+RESUME_MARGIN+' 秒')
+                                     : ('恢复中…还需 '+Math.ceil(pendingResumeAt-bufEndAbs)+' 秒');
+  const now=Date.now();   // 等待期间若长时间没有新数据,说明这一路又断了,重新走恢复
+  if(bufEndAbs>resumeLastBuf+0.3){ resumeLastBuf=bufEndAbs; resumeLastGrow=now; }
+  else if(resumeLastGrow && now-resumeLastGrow>25000){ pendingResumeAt=0; resumeLastGrow=0; doRecover(); }
+}, 500);
+
 let drainChecking=false;
-setInterval(async ()=>{ if(player && !isLiveNow && curFilm && !V.paused){
-  const a=V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0;
+setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pendingResumeAt)){
+  const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
+  // 恢复等待期间按"目标位置之后还有多少"上报(否则服务端会以为缓冲已满而停止供数,永远等不到目标)
+  const a = pendingResumeAt ? Math.max(0, bufEndAbs-pendingResumeAt)
+                            : (V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0);
   fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{});   // 保活 + 上报缓冲量给服务端节流
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
-  if(a < 6 && !recovering && !switching && !drainChecking){ drainChecking=true;
+  if(a < 6 && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;
     try{ const st=await jget('/api/streamstate'); if(!st.feeding) doRecover(); }catch(e){}
     drainChecking=false;
   }
