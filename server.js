@@ -132,6 +132,8 @@ setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>I
 
 // ---------- 取流(直播/点播共用),token化+串行化 ----------
 let streamMutex=Promise.resolve();
+let prematureCount=0, prematureLabel='';   // 连续"有数据但很快提前结束"计数:churn会把P2P引擎搞到只能吐几秒就EOF,
+                // 这种情况前端会不停重起->更多churn->自我维持的死循环。连续多次即判引擎已坏,冷重启自愈
 let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请求,只有最新的才该触达原生。
                 // 旧请求若也去 vodStart 再被抛弃,就是"起流->没出数据->停掉"的高频churn,实测6次就能毒死P2P引擎
 const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
@@ -224,7 +226,8 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
-      ff.stdout.on('data',()=>{ const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活;lastData=最后出数时刻(供feeding判断:恢复时源还在不在供数)
+      let outBytes=0;
+      ff.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活;lastData=最后出数时刻(供feeding判断:恢复时源还在不在供数)
       if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       ff.stdout.pipe(res);
       // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<56秒续读 -> 缓冲稳定56-60秒,抖动自动回填(读速2x,1x播放约60秒填满)
@@ -234,7 +237,20 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         try{ if(!bufPaused && curBuf>60){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ ff.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
       }, 1000);
       ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
-      ff.on('exit',()=>{ if(current.token===myToken) current.ffExited=true; });
+      ff.on('exit',(code,sig)=>{ if(current.token===myToken) current.ffExited=true;
+        // 只统计 ffmpeg 自行结束(源EOF);SIGKILL 是我们主动拆流(seek/切集),不能算,否则正常操作会误触发冷重启
+        if(sig!=='SIGKILL' && !isLive && !nearEndVod){   // 点播:产出很少就自行结束 = 源提前EOF(P2P被churn搞坏的典型症状),不是真片尾
+          if(outBytes < 25*1024*1024){   // <25MB(约25秒画面)
+            if(prematureLabel!==label){ prematureLabel=label; prematureCount=0; }
+            prematureCount++;
+            console.log('['+label+'] 提前结束(仅'+(outBytes/1048576).toFixed(1)+'MB) 连续'+prematureCount+'次');
+            if(prematureCount>=3 && state==='ready'){   // 连续3次=引擎已坏,冷重启自愈,打断"8秒循环"
+              prematureCount=0; console.log('['+label+'] 连续提前结束 -> 触发冷重启App自愈');
+              needColdRestart=true; state='off'; try{ if(session) session.detach(); }catch(e){}
+            }
+          } else { prematureCount=0; }   // 正常长播:清零
+        }
+      });
       // 拆掉正在播放的流(用户seek/切集换流时走这里)。stop 必须串进 streamMutex 队列:
       // 之前是 fire-and-forget,会在下一路 vodStart 之后才执行 -> 把刚起来的新流掐断 ->
       // 表现为"播几秒就断、反复重播同一段"(ffmpeg报 Stream ends prematurely)
