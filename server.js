@@ -27,7 +27,7 @@ function readDevFile(dev){
   } catch(e){ return null; }
 }
 // FFmpeg 容错解码 + 硬件重编码;-readrate 1.0 按实时读(不追上P2P直播边缘),initial_burst 快读垫底
-function spawnTranscode(srcPort, isLive, nearEnd){
+function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec){
   // 直播:transient P2P 抖动时底层重连更顺;点播:绝不重连——EOF=内容真结束,重连会反复GET已结束端口把原生app打崩
   // 直播:P2P抖动时底层重连更顺。
   // 点播:同样开重连,并且开 reconnect_at_eof —— P2P在我们读到"已下载数据尽头"时会直接关掉连接,
@@ -48,13 +48,16 @@ function spawnTranscode(srcPort, isLive, nearEnd){
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
   const rwto = isLive ? ['-rw_timeout','30000000'] : [];   // 点播:根本不设读超时。ffmpeg只要连接(页面)还开着就一直活,暂停多久都不自杀;页面关/掉线→res close→teardown回收(见serveStream);真卡死(源挂/App崩)由前端看门狗冻结~24s重取兜底。直播保留30s,与-reconnect配套扛P2P抖动
-  const args=['-hide_banner','-loglevel','error', ...rec, ...rwto,
+  const seek = (skipSec>0.05) ? ['-ss', skipSec.toFixed(3)] : [];             // 续接时跳过与上一段重叠的部分,避免重复内容
+  const tsoff = (tsOffsetSec>0.05) ? ['-output_ts_offset', tsOffsetSec.toFixed(3)] : [];  // 让新一段的时间戳接着上一段走,客户端看到的是一条连续的流
+  const prog = isLive ? [] : ['-progress','pipe:2'];                          // 上报已输出时长,续接时据此算出续接点
+  const args=['-hide_banner','-loglevel','error', ...prog, ...rec, ...rwto,
     '-fflags','+discardcorrupt+genpts','-err_detect','ignore_err',
     ...rate,
-    '-i','http://127.0.0.1:'+srcPort+'/',
+    ...seek, '-i','http://127.0.0.1:'+srcPort+'/',
     ...venc,
     '-c:a','aac','-b:a','160k','-ac','2',
-    '-f','mpegts','-muxdelay','0','-muxpreload','0','pipe:1'];
+    ...tsoff, '-f','mpegts','-muxdelay','0','-muxpreload','0','pipe:1'];
   const ff=spawn(FFMPEG,args,{stdio:['ignore','pipe','pipe']});
   let errbuf='';
   ff.stderr.on('data',d=>{ errbuf=(errbuf+d.toString()).slice(-1000); });
@@ -148,7 +151,7 @@ let prematureCount=0, prematureLabel='';   // 连续"有数据但很快提前结
 let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请求,只有最新的才该触达原生。
                 // 旧请求若也去 vodStart 再被抛弃,就是"起流->没出数据->停掉"的高频churn,实测6次就能毒死P2P引擎
 const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
-function serveStream(req, res, playFn, label, isLive, nearEndVod){
+function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
   const mySeq = ++reqSeq;   // 同步取号(在排队之前),后来者会让先来者作废
   try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
   streamMutex = streamMutex.then(async()=>{
@@ -246,34 +249,65 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
       let outBytes=0;
-      ff.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });  // 播放中保活;lastData=最后出数时刻(供feeding判断:恢复时源还在不在供数)
       if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
-      ff.stdout.pipe(res);
-      // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压,~4秒短暂不会断P2P)、<56秒续读 -> 缓冲稳定56-60秒,抖动自动回填(读速2x,1x播放约60秒填满)
-      let bufPaused=false;
-      const throttle = isLive ? null : setInterval(()=>{
-        if(current.token!==myToken){ clearInterval(throttle); return; }
-        try{ if(!bufPaused && curBuf>60){ ff.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ ff.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
-      }, 1000);
-      ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
-      ff.on('exit',(code,sig)=>{ if(current.token===myToken) current.ffExited=true;
-        // 只统计 ffmpeg 自行结束(源EOF);SIGKILL 是我们主动拆流(seek/切集),不能算,否则正常操作会误触发冷重启
-        if(sig!=='SIGKILL' && !isLive && !nearEndVod){   // 点播:产出很少就自行结束 = 源提前EOF(P2P被churn搞坏的典型症状),不是真片尾
-          if(outBytes < 25*1024*1024){   // <25MB(约25秒画面)
-            if(prematureLabel!==label){ prematureLabel=label; prematureCount=0; }
-            prematureCount++;
-            console.log('['+label+'] 提前结束(仅'+(outBytes/1048576).toFixed(1)+'MB) 连续'+prematureCount+'次');
-            if(prematureCount>=3 && state==='ready'){   // 连续3次=引擎已坏,冷重启自愈,打断"8秒循环"
-              prematureCount=0; console.log('['+label+'] 连续提前结束 -> 触发冷重启App自愈');
-              needColdRestart=true; state='off'; try{ if(session) session.detach(); }catch(e){}
-            }
-          } else { prematureCount=0; }   // 正常长播:清零
+      // ——— 源断了由服务端无缝续接,客户端全程只看到一条不间断的流 ———
+      // P2P 会周期性主动关闭连接(实测直连原始端口也会:给十几MB就关)。以前这会让前端重建播放器、
+      // 丢掉几十秒已缓冲内容、黑屏重来。现在改由服务端处理:算出已经送出多少内容,重新取流并用
+      // -ss 跳过重叠部分、-output_ts_offset 接续时间戳,继续写进同一个HTTP响应。客户端无感。
+      const durSec = (vod && vod.dur>0) ? vod.dur : 0;
+      const segStartAbs = durSec ? (vod.percent/100*durSec) : 0;
+      let deliveredSec = 0, segOut = 0, splicing = false, finished = false;
+      const readProgress = (d)=>{ const m=(''+d).match(/out_time_us=(\d+)/g); if(m&&m.length){ const v=parseInt(m[m.length-1].split('=')[1],10); if(!isNaN(v)) segOut = v/1e6; } };
+
+      const wire = (proc)=>{
+        proc.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });
+        proc.stderr.on('data', readProgress);
+        proc.stdout.pipe(res,{end:false});          // 不让某一段结束就把响应关掉
+        proc.on('exit',(code,sig)=>{ onSegEnd(proc,sig); });
+        proc.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); try{res.end();}catch(_){} });
+      };
+
+      async function onSegEnd(proc, sig){
+        if(current.token===myToken) current.ffExited=true;
+        if(finished || splicing) return;
+        if(sig==='SIGKILL') return;                                    // 我们主动拆的(seek/切集/客户端离开)
+        if(res.writableEnded || req.destroyed){ finished=true; return; }
+        deliveredSec += segOut; segOut = 0;
+        const resumeAbs = segStartAbs + deliveredSec;
+        if(isLive || !durSec || !vod || !vod.mkPlay || resumeAbs >= durSec*0.985){   // 真到片尾:正常结束
+          finished=true; try{ res.end(); }catch(e){}
+          console.log('['+label+'] 播放到内容结尾('+resumeAbs.toFixed(0)+'/'+durSec+'s)');
+          return;
         }
-      });
+        splicing = true;
+        const pct = Math.max(0, Math.min(96, Math.floor(resumeAbs/durSec*100)));
+        const skip = Math.max(0, resumeAbs - pct/100*durSec);
+        console.log('['+label+'] 源断开于 '+resumeAbs.toFixed(0)+'s -> 无缝续接(从'+pct+'%跳过'+skip.toFixed(0)+'s)');
+        try{
+          try{ if(script) await script.exports.stop(); }catch(e){}
+          await sleep(600);
+          await ensureReady();                       // 续接期间引擎可能已崩/被回收,先确保就绪(否则 script 为空直接抛错)
+          if(!script) throw new Error('引擎未就绪');
+          const r = await vod.mkPlay(pct);
+          if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
+          adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
+          if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
+          myPort = r.port;
+          const np = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec);
+          ff = np; if(current.token===myToken){ current.ff = np; current.port = r.port; current.ffExited=false; }
+          wire(np);
+          splicing = false;
+        }catch(e){
+          console.error('['+label+'] 续接失败:', e&&(e.message||e));
+          splicing=false; finished=true; try{ res.end(); }catch(_){}   // 让前端按老路走恢复
+        }
+      }
+
+      wire(ff);
       // 拆掉正在播放的流(用户seek/切集换流时走这里)。stop 必须串进 streamMutex 队列:
       // 之前是 fire-and-forget,会在下一路 vodStart 之后才执行 -> 把刚起来的新流掐断 ->
       // 表现为"播几秒就断、反复重播同一段"(ffmpeg报 Stream ends prematurely)
-      const teardown=()=>{ if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false};
+      const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false};
         streamMutex = streamMutex.then(async()=>{ try{ if(script) await script.exports.stop(); }catch(e){} }); } };
       res.on('close',teardown); res.on('error',teardown);
     } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
@@ -411,7 +445,9 @@ app.get('/api/search', async (req,res)=>{
 app.get('/vod-stream', (req,res)=>{
   const {channelId, ip, port}=req.query; const percent=Math.max(0,Math.min(96,parseInt(req.query.percent||'0',10)||0));  // 上限96:冷启动在最后几%会撞P2P文件尾edge-catch;向前播放可正常到真片尾
   if(!channelId||!ip||!port){ return res.status(400).end('bad params'); }
-  serveStream(req,res,()=>script.exports.vodPlay(channelId, ip, parseInt(port,10), percent), 'vod:'+channelId, false, percent>=90);   // percent>=90 视为接近片尾
+  const dur=parseFloat(req.query.dur||'0')||0;   // 影片总时长:服务端据此判断"源断了"还是"真到片尾",并算出续接点
+  const mkPlay=(pct)=>{ if(!script) throw new Error('引擎未就绪'); return script.exports.vodPlay(channelId, ip, parseInt(port,10), pct); };
+  serveStream(req,res,()=>mkPlay(percent), 'vod:'+channelId, false, percent>=90, {dur, percent, mkPlay});   // percent>=90 视为接近片尾
 });
 
 // ---------- 海报(P2P 下载 + 缓存,小并发池) ----------

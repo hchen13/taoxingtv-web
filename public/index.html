@@ -334,7 +334,7 @@ function closeDetail(){ $('detail').classList.remove('show'); }
 function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
   vodBase=vodDur?Math.floor(percent/100*vodDur):0; curPct=percent;
   const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
-  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}`;
+  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}&dur=${vodDur||0}`;   // 带上时长:服务端据此在源断开时无缝续接,并区分'源断了'与'真到片尾'
   startPlay(title,url,false); updEpBtns();
   pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm});
   { const le=LS.get('txtv_lastep',{}); le[curFilm.playid]=curEpIdx; LS.set('txtv_lastep',le); }  // 记录本片上次看到的集
