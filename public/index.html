@@ -360,6 +360,9 @@ function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; windo
      liveSync:isLive, liveSyncMaxLatency:isLive?30:1.2, liveSyncTargetLatency:isLive?18:0.8, liveSyncPlaybackRate:1.08,
      lazyLoad:!isLive, lazyLoadMaxDuration:30, lazyLoadRecoverDuration:10, stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
   player.attachMediaElement(V); player.load();
+  // 点播起播/跳进度:先攒够预缓冲再播。直接在canplay就播(那时才1-2秒缓冲)会"放几秒就卡",
+  // 卡了又触发恢复重取,表现就是"播几秒->缓冲->回退->再播几秒"。恢复流程自带更大的余量,不覆盖它。
+  if(!isLive && !pendingResumeAt){ pendingResumeAt = vodBase + 0.1; pendingMargin = START_PREBUFFER; }
   V.oncanplay=()=>{ if(!pendingResumeAt) $('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
     if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
   player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b); });
@@ -469,7 +472,7 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
     if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
     else if(curFilm){ const pct=vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0;
       const newBase=vodDur?Math.floor(pct/100*vodDur):0;
-      pendingResumeAt = (pos-newBase>3) ? pos : 0;   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
+      pendingResumeAt = (pos-newBase>3) ? pos : 0; pendingMargin = RESUME_MARGIN;   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
       playEpisode(pct); }
   }catch(e){} fromRecovery=false; recovering=false; }, (Date.now()-streamStartedAt<25000 ? 4000 : (recoverTimes<=2?600:0)) || Math.min(10000,600*Math.pow(2,recoverTimes-2)));
   // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
@@ -534,24 +537,27 @@ function startHeartbeat(){ setInterval(()=>{ if(!document.hidden) fetch('/api/he
 // 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,
 // 等缓冲越过中断位置、并且再往后攒够 RESUME_MARGIN 秒余量,才跳回中断处继续播。
 // 余量是关键:缓冲一到就播往往刚播就见底->又断->又回到那个百分点->死循环。
-let pendingResumeAt=0, resumeLastBuf=0, resumeLastGrow=0;
-const RESUME_MARGIN=12;
+let pendingResumeAt=0, pendingMargin=12, resumeLastBuf=0, resumeLastGrow=0;
+const RESUME_MARGIN=10, START_PREBUFFER=6;   // 预缓冲不能设太大:实测源每个连接只送约12MB就主动关闭,一次连接给的内容可能到不了20秒,门槛过高会永远攒不够而不开播(比不设门更糟)。6秒足以避免'一播就见底'——起播就播(canplay时只有1-2秒)必然放几秒就见底->卡顿->触发恢复(表现为"回退")
 setInterval(()=>{
   if(!pendingResumeAt || !player || isLiveNow || !curFilm) return;
   const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
+  const now=Date.now();
+  if(bufEndAbs>resumeLastBuf+0.2){ resumeLastBuf=bufEndAbs; resumeLastGrow=now; }        // 数据在流动
+  else if(resumeLastGrow && now-resumeLastGrow>40000){ pendingResumeAt=0; resumeLastGrow=0; doRecover(); return; }   // 40秒真没动=这一路废了,重来
   // 缓冲刚越过中断位置就先跳过去(此时已看过的部分变成"背后",会被自动回收,避免缓冲无限膨胀)
   if(bufEndAbs >= pendingResumeAt && (vodBase+V.currentTime) < pendingResumeAt-0.5){
     try{ V.currentTime = pendingResumeAt - vodBase; }catch(e){}
   }
   const ahead = bufEndAbs - pendingResumeAt;
-  if(ahead >= RESUME_MARGIN){   // 余量够了才真正开始播
+  // 跳转后P2P常常"先给一小段、再安静十几秒去找数据、然后才稳定供流"。
+  // 只看余量够不够会在"安静期"开播 -> 放几秒就卡。必须同时要求"此刻数据正在流动"。
+  const flowing = resumeLastGrow && (Date.now()-resumeLastGrow < 2000);
+  if(ahead >= pendingMargin && flowing){   // 余量够 且 源正在稳定供数,才真正开始播
     pendingResumeAt=0; $('load').classList.remove('show'); V.playbackRate=curSpeed; V.play().catch(()=>{}); return;
   }
-  $('loadtx').textContent = ahead>=0 ? ('恢复中…缓冲 '+Math.floor(ahead)+'/'+RESUME_MARGIN+' 秒')
-                                     : ('恢复中…还需 '+Math.ceil(pendingResumeAt-bufEndAbs)+' 秒');
-  const now=Date.now();   // 等待期间若长时间没有新数据,说明这一路又断了,重新走恢复
-  if(bufEndAbs>resumeLastBuf+0.3){ resumeLastBuf=bufEndAbs; resumeLastGrow=now; }
-  else if(resumeLastGrow && now-resumeLastGrow>25000){ pendingResumeAt=0; resumeLastGrow=0; doRecover(); }
+  $('loadtx').textContent = ahead>=0 ? ('缓冲中… '+Math.floor(ahead)+'/'+pendingMargin+' 秒'+(flowing?'':'(源正在准备)'))
+                                     : ('缓冲中…还需 '+Math.ceil(pendingResumeAt-bufEndAbs)+' 秒');
 }, 500);
 
 let drainChecking=false, dryStart=0;   // dryStart:缓冲见底且源不出数据的起始时刻。短暂不出数据是P2P常态,必须等,不能立刻重取(重取=churn=把引擎搞坏)
@@ -568,7 +574,7 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pend
       if(!st.alive){ dryStart=0; doRecover(); }                       // 流真的死了(ffmpeg没了)->才重取
       else if(!st.feeding){                                           // 源暂时没出数据:这在P2P很常见,原生就是转圈等
         if(!dryStart) dryStart=Date.now();
-        else if(Date.now()-dryStart > 25000){ dryStart=0; doRecover(); }   // 持续25秒真没数据才重取
+        else if(Date.now()-dryStart > 45000){ dryStart=0; doRecover(); }   // 持续45秒才重取:重取会让P2P从头爬坡,通常比继续等更糟
         if(dryStart) $('loadtx').textContent='缓冲中…';
       } else dryStart=0;                                              // 还在供数,只是慢,继续等
     }catch(e){}

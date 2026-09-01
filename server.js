@@ -33,15 +33,17 @@ function spawnTranscode(srcPort, isLive, nearEnd){
   // 点播:同样开重连,并且开 reconnect_at_eof —— P2P在我们读到"已下载数据尽头"时会直接关掉连接,
   // ffmpeg看到连接断=输入结束就退出,表现为"播着播着停下来缓冲/断流"。开了at_eof就变成"等一下再接着读",
   // 正是应有的行为。真片尾不会无限重连:近片尾(nearEnd)由调用方关掉重连,且前端按时长/位置判定真结束。
-  const rec = (isLive || !nearEnd)
-    ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_at_eof','1','-reconnect_delay_max','4']
-    : [];
+  // 点播绝不重连:实测 reconnect_at_eof 每次重连都立刻又EOF,毫无帮助;而反复GET已结束端口会伤原生引擎
+  const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
   // 点播:P2P会下载超前,用2x读+编码器全速产出,填出~30秒深缓冲吸收P2P抖动(像原生mpv,不卡);
   // 直播:1x实时读 + 断供后 catchup 4x 把源的追赶突发拉进来回填(实测源快读不会EOF,稳定攒~11秒深缓冲),initial_burst 开台垫底
   // 点播 1.5x:原生是 MediaPlayer 按实时速度读,从不追上P2P的下载进度。我们曾用2x想快点攒满60秒缓冲,
   // 结果经常追到"已下载数据的尽头",ffmpeg把它当成流结束直接退出 -> 表现为"播着播着就停下来缓冲"。
   // 1.5x 仍能慢慢攒出余量,又不容易撞尽头。
-  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','1.5'];
+  // 点播加 initial_burst 30:开头30秒内容不限速、有多快读多快,让预缓冲在源给力时几秒就填满(否则1.5x要等十几秒);
+  // 之后回到1.5x,既能慢慢攒余量又不容易追上P2P的下载进度
+  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15']
+                      : ['-readrate','2.0'];   // 点播固定2x:不能加 initial_burst(开头不限速猛读会瞬间追上P2P下载进度、直接撞EOF,实测1.7MB就断)
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
