@@ -347,7 +347,7 @@ $('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(r
 function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
 function toggleSide(){ const app=document.querySelector('.app'); const c=app.classList.toggle('collapsed'); $('sideTgl').textContent=c?'›':'‹'; try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} }
 try{ if(localStorage.getItem('txtv_side')==='1'){ document.querySelector('.app').classList.add('collapsed'); $('sideTgl').textContent='›'; } }catch(e){}
-function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
   if(player){try{player.destroy()}catch(e){}player=null;}
@@ -441,7 +441,7 @@ document.addEventListener('keydown',e=>{
 
 // —— 恢复策略(对齐原生App):临时卡顿不重取,让它自己缓冲恢复;
 //    真结束(tell=2)自动下一集;真断流(ffmpeg退出)才从当前位置重取。 ——
-let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1, fromRecovery=false;   // fromRecovery:本次换流是恢复流程自己发起的(而非用户操作)
+let recovering=false, recoverTimes=0, lastRecover=0, recoverTimer=null, recoverPos=-1, fromRecovery=false, streamStartedAt=0;   // fromRecovery:本次换流是恢复流程自己发起的(而非用户操作)
 function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTimer=null;} recovering=false; }
 // 用户主动换流(seek/切集/换台)时清零故障计数:这些不是"播放故障",不该累加到上限去弹"播放中断"。
 // (只在非恢复流程中清零,否则恢复失败的循环会永远清零、失去上限保护)
@@ -471,7 +471,8 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
       const newBase=vodDur?Math.floor(pct/100*vodDur):0;
       pendingResumeAt = (pos-newBase>3) ? pos : 0;   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
       playEpisode(pct); }
-  }catch(e){} fromRecovery=false; recovering=false; }, recoverTimes<=2?600:Math.min(10000,600*Math.pow(2,recoverTimes-2)));   // 指数退避:别在引擎自愈期间高频重试制造新churn
+  }catch(e){} fromRecovery=false; recovering=false; }, (Date.now()-streamStartedAt<25000 ? 4000 : (recoverTimes<=2?600:0)) || Math.min(10000,600*Math.pow(2,recoverTimes-2)));
+  // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
 }
 V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
 V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。
@@ -527,7 +528,7 @@ $('moreBtn').onclick=(e)=>{ e.stopPropagation(); $('mDialog').classList.toggle('
 $('moreMenu').addEventListener('click',e=>e.stopPropagation());
 document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
 
-function startHeartbeat(){ setInterval(()=>{ if(!document.hidden && player) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }
+function startHeartbeat(){ setInterval(()=>{ if(!document.hidden) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }   // 只要页面开着就保活(不再要求有播放器):页面在就别释放引擎,否则刷新/播放中断后引擎被回收,再用要等一分钟冷启动
 // 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
 // —— 恢复不回头看 ——
 // 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,

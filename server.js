@@ -27,12 +27,21 @@ function readDevFile(dev){
   } catch(e){ return null; }
 }
 // FFmpeg 容错解码 + 硬件重编码;-readrate 1.0 按实时读(不追上P2P直播边缘),initial_burst 快读垫底
-function spawnTranscode(srcPort, isLive){
+function spawnTranscode(srcPort, isLive, nearEnd){
   // 直播:transient P2P 抖动时底层重连更顺;点播:绝不重连——EOF=内容真结束,重连会反复GET已结束端口把原生app打崩
-  const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
+  // 直播:P2P抖动时底层重连更顺。
+  // 点播:同样开重连,并且开 reconnect_at_eof —— P2P在我们读到"已下载数据尽头"时会直接关掉连接,
+  // ffmpeg看到连接断=输入结束就退出,表现为"播着播着停下来缓冲/断流"。开了at_eof就变成"等一下再接着读",
+  // 正是应有的行为。真片尾不会无限重连:近片尾(nearEnd)由调用方关掉重连,且前端按时长/位置判定真结束。
+  const rec = (isLive || !nearEnd)
+    ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_at_eof','1','-reconnect_delay_max','4']
+    : [];
   // 点播:P2P会下载超前,用2x读+编码器全速产出,填出~30秒深缓冲吸收P2P抖动(像原生mpv,不卡);
   // 直播:1x实时读 + 断供后 catchup 4x 把源的追赶突发拉进来回填(实测源快读不会EOF,稳定攒~11秒深缓冲),initial_burst 开台垫底
-  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','2.0'];  // 点播:2x持续读快速填/回填深缓冲;上限由 serveStream 反馈节流控制(有界~60秒)
+  // 点播 1.5x:原生是 MediaPlayer 按实时速度读,从不追上P2P的下载进度。我们曾用2x想快点攒满60秒缓冲,
+  // 结果经常追到"已下载数据的尽头",ffmpeg把它当成流结束直接退出 -> 表现为"播着播着就停下来缓冲"。
+  // 1.5x 仍能慢慢攒出余量,又不容易撞尽头。
+  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15'] : ['-readrate','1.5'];
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
@@ -158,7 +167,8 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
 
-      const firstByteMs = isLive ? 12000 : 30000;   // 首字节耐心:点播给 P2P 缓冲 30s(接近原生 MediaPlayer 的耐心),不再 10s 就判死端口拆流重取——这是 churn 主因之一
+      const firstByteMs = 12000;   // 首字节耐心:实测健康时 2.5-3.5 秒出数据,12秒已是3倍余量。
+      // (曾设成30秒想"更有耐心",结果每次失败都要干等30秒、拖慢每一次拖进度,是过度矫正)
       let ff=null, myPort=0, buffered=null, badPortCount=0, deadPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
         const r = await playFn();
@@ -172,10 +182,14 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         }
         const port=r.port;
         adb(['forward','tcp:'+port,'tcp:'+port]);
-        const cand=spawnTranscode(port, isLive);
+        let cand=null, gotData=false;
+        // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
+        // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
+        for(let sub=1; sub<=3 && !aborted; sub++){
+        cand=spawnTranscode(port, isLive, nearEndVod);
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
         const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
-        const gotData = await new Promise(resolve=>{
+        gotData = await new Promise(resolve=>{
           timer=setTimeout(()=>resolve(false), firstByteMs);
           onFirst=()=>resolve(true); onCandExit=()=>resolve(false);
           cand.stdout.on('data', collect);
@@ -187,12 +201,15 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
         if(gotData && !aborted){
           cand.stdout.removeListener('data', collect);
           ff=cand; myPort=port; buffered=buf;
-          if(attempt>1) console.log('['+label+'] 第'+attempt+'次取流出数据(前'+(attempt-1)+'次死端口)');
+          if(sub>1) console.log('['+label+'] 同端口第'+sub+'次重开ffmpeg后出数据');
           break;
         }
-        deadPortCount++;
-        console.log('['+label+'] 端口'+port+' '+(firstByteMs/1000)+'s 无数据(死端口/即时EOF) kill+重取 '+attempt+'/'+MAX_START_TRIES);
         try{ cand.kill('SIGKILL'); }catch(e){}
+        if(sub<3 && !aborted){ console.log('['+label+'] 端口'+port+' 未出数据,同端口重开ffmpeg '+sub+'/3(等P2P下载)'); await sleep(2500); }
+        }   // end sub loop
+        if(ff) break;
+        deadPortCount++;
+        console.log('['+label+'] 端口'+port+' 同端口重开3次仍无数据 -> 重新取流 '+attempt+'/'+MAX_START_TRIES);
         try{ if(script) await script.exports.stop(); }catch(e){}   // await:同上,防止晚到的stop杀掉下一次重取
         adb(['forward','--remove','tcp:'+port]);
         await sleep(800);
