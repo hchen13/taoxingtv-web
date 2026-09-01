@@ -315,8 +315,11 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         try{ const cur=ff; if(!bufPaused && curBuf>60){ cur.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ cur.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
         // 停滞检测:没被我们节流,却20秒没有任何新数据 -> 源哑了(ffmpeg会无限阻塞不自己退出),主动触发无缝续接
         try{
-          if(!bufPaused && !splicing && !finished && current.lastData && Date.now()-current.lastData>20000){
-            console.log('['+label+'] 源停滞20秒 -> 主动续接');
+          // 只有"客户端缓冲快见底了 还 20秒拿不到数据"才算真停滞。
+          // 客户端暂停/缓冲充足时数据本就不该流动(背压),不能当成源哑了——否则会在用户暂停期间
+          // 反复强行续接,把流反复重建、时间戳错乱(表现为画面卡住只剩声音)
+          if(curBuf < 10 && !bufPaused && !splicing && !finished && current.lastData && Date.now()-current.lastData>20000){
+            console.log('['+label+'] 缓冲见底且源停滞20秒 -> 主动续接');
             wantSplice=true; try{ ff.kill('SIGKILL'); }catch(e){}
           }
         }catch(e){}
