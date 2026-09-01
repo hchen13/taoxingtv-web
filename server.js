@@ -67,7 +67,7 @@ function appRunning(){ return adb(['shell','pidof',PKG]).trim().length>0; }
 
 function cleanupCurrent(){
   if(current.ff){ try{current.ff.kill('SIGKILL');}catch(e){} }
-  if(current.port){ try{ if(script)script.exports.stop().catch(()=>{}); }catch(e){} adb(['forward','--remove','tcp:'+current.port]); }
+  if(current.port){ streamMutex = streamMutex.then(async()=>{ try{ if(script) await script.exports.stop(); }catch(e){} }); adb(['forward','--remove','tcp:'+current.port]); }   // 同样串进队列,避免晚到的stop掐断下一路流
   current={token:current.token, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
 }
 
@@ -235,7 +235,11 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod){
       }, 1000);
       ff.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(current.token===myToken){ current.ffExited=true; cleanupCurrent(); } try{res.end();}catch(_){} });
       ff.on('exit',()=>{ if(current.token===myToken) current.ffExited=true; });
-      const teardown=()=>{ if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ try{if(script)script.exports.stop().catch(()=>{});}catch(e){} adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; } };
+      // 拆掉正在播放的流(用户seek/切集换流时走这里)。stop 必须串进 streamMutex 队列:
+      // 之前是 fire-and-forget,会在下一路 vodStart 之后才执行 -> 把刚起来的新流掐断 ->
+      // 表现为"播几秒就断、反复重播同一段"(ffmpeg报 Stream ends prematurely)
+      const teardown=()=>{ if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false};
+        streamMutex = streamMutex.then(async()=>{ try{ if(script) await script.exports.stop(); }catch(e){} }); } };
       res.on('close',teardown); res.on('error',teardown);
     } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
       if(current.token===myToken && current.starting){ current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; }
