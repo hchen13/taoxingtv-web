@@ -554,7 +554,7 @@ setInterval(()=>{
   else if(resumeLastGrow && now-resumeLastGrow>25000){ pendingResumeAt=0; resumeLastGrow=0; doRecover(); }
 }, 500);
 
-let drainChecking=false;
+let drainChecking=false, dryStart=0;   // dryStart:缓冲见底且源不出数据的起始时刻。短暂不出数据是P2P常态,必须等,不能立刻重取(重取=churn=把引擎搞坏)
 setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pendingResumeAt)){
   const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
   // 恢复等待期间按"目标位置之后还有多少"上报(否则服务端会以为缓冲已满而停止供数,永远等不到目标)
@@ -562,8 +562,16 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm && (!V.paused || pend
                             : (V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0);
   fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{});   // 保活 + 上报缓冲量给服务端节流
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
+  if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
   if(a < 6 && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;
-    try{ const st=await jget('/api/streamstate'); if(!st.feeding) doRecover(); }catch(e){}
+    try{ const st=await jget('/api/streamstate');
+      if(!st.alive){ dryStart=0; doRecover(); }                       // 流真的死了(ffmpeg没了)->才重取
+      else if(!st.feeding){                                           // 源暂时没出数据:这在P2P很常见,原生就是转圈等
+        if(!dryStart) dryStart=Date.now();
+        else if(Date.now()-dryStart > 25000){ dryStart=0; doRecover(); }   // 持续25秒真没数据才重取
+        if(dryStart) $('loadtx').textContent='缓冲中…';
+      } else dryStart=0;                                              // 还在供数,只是慢,继续等
+    }catch(e){}
     drainChecking=false;
   }
 } }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
