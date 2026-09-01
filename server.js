@@ -272,16 +272,19 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         if(finished || splicing) return;
         if(sig==='SIGKILL') return;                                    // 我们主动拆的(seek/切集/客户端离开)
         if(res.writableEnded || req.destroyed){ finished=true; return; }
-        deliveredSec += segOut; segOut = 0;
+        const segLen = segOut; deliveredSec += segOut; segOut = 0;
         const resumeAbs = segStartAbs + deliveredSec;
-        if(isLive || !durSec || !vod || !vod.mkPlay || resumeAbs >= durSec*0.985){   // 真到片尾:正常结束
+        // 连续多次续接都几乎取不到内容 = 真到片尾(或源彻底没了),停止续接,否则会在片尾无限重连
+        if(segLen < 2) emptySplices++; else emptySplices = 0;
+        if(isLive || !vod || !vod.mkPlay || emptySplices >= 3 || (durSec && resumeAbs >= durSec*0.985)){
           finished=true; try{ res.end(); }catch(e){}
-          console.log('['+label+'] 播放到内容结尾('+resumeAbs.toFixed(0)+'/'+durSec+'s)');
+          console.log('['+label+'] 结束于 '+resumeAbs.toFixed(0)+'s'+(durSec?('/'+durSec+'s'):'')+(emptySplices>=3?'(连续取不到内容)':''));
           return;
         }
         splicing = true;
-        const pct = Math.max(0, Math.min(96, Math.floor(resumeAbs/durSec*100)));
-        const skip = Math.max(0, resumeAbs - pct/100*durSec);
+        // 知道总时长就跳到最近的百分点(跳过的秒数少、续接快);不知道(老页面没传dur)就用同一个百分点跳过已播时长——同样正确,只是跳过得多一点
+        const pct = durSec ? Math.max(0, Math.min(96, Math.floor(resumeAbs/durSec*100))) : vod.percent;
+        const skip = durSec ? Math.max(0, resumeAbs - pct/100*durSec) : deliveredSec;
         console.log('['+label+'] 源断开于 '+resumeAbs.toFixed(0)+'s -> 无缝续接(从'+pct+'%跳过'+skip.toFixed(0)+'s)');
         try{
           try{ if(script) await script.exports.stop(); }catch(e){}
