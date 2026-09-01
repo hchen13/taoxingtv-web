@@ -307,6 +307,20 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       }
 
       wire(ff);
+
+      // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压)、<56秒续读 -> 缓冲稳定56-60秒
+      let bufPaused=false;
+      const throttle = isLive ? null : setInterval(()=>{
+        if(current.token!==myToken){ clearInterval(throttle); return; }
+        try{ const cur=ff; if(!bufPaused && curBuf>60){ cur.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ cur.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
+        // 停滞检测:没被我们节流,却20秒没有任何新数据 -> 源哑了(ffmpeg会无限阻塞不自己退出),主动触发无缝续接
+        try{
+          if(!bufPaused && !splicing && !finished && current.lastData && Date.now()-current.lastData>20000){
+            console.log('['+label+'] 源停滞20秒 -> 主动续接');
+            wantSplice=true; try{ ff.kill('SIGKILL'); }catch(e){}
+          }
+        }catch(e){}
+      }, 1000);
       // 拆掉正在播放的流(用户seek/切集换流时走这里)。stop 必须串进 streamMutex 队列:
       // 之前是 fire-and-forget,会在下一路 vodStart 之后才执行 -> 把刚起来的新流掐断 ->
       // 表现为"播几秒就断、反复重播同一段"(ffmpeg报 Stream ends prematurely)
