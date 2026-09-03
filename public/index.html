@@ -5,8 +5,8 @@
 <style>
   :root{--bg:#0d0f14;--panel:#151922;--panel2:#1b2130;--line:#232a3a;--txt:#e6e9ef;--dim:#8a93a6;--acc:#3b82f6;--acc2:#2563eb}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;height:100vh;overflow:hidden}
-  .app{display:grid;grid-template-columns:340px 1fr;height:100vh;transition:grid-template-columns .22s ease}
+  body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;height:100vh;height:100dvh;overflow:hidden}
+  .app{display:grid;grid-template-columns:340px 1fr;height:100vh;height:100dvh;transition:grid-template-columns .22s ease}
   .app.collapsed{grid-template-columns:0 1fr}
   .side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;overflow:hidden}
   .tabs{display:flex;border-bottom:1px solid var(--line)}
@@ -34,6 +34,8 @@
   .main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:#000;position:relative}
   .sideToggle{position:absolute;left:0;top:50%;transform:translateY(-50%);z-index:5;width:20px;height:64px;background:rgba(0,0,0,.45);color:#fff;border:none;border-radius:0 9px 9px 0;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;opacity:.28;transition:opacity .2s,background .2s}
   .sideToggle:hover{opacity:.95;background:rgba(0,0,0,.72)}
+  .stage:fullscreen .sideToggle,.stage:-webkit-full-screen .sideToggle{display:none}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:19;display:none}   /* 横屏手机抽屉打开时盖住画面,点一下收起 */
   .stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden}
   video{width:100%;height:100%;background:#000;object-fit:contain}
   .hint{position:absolute;color:var(--dim);font-size:15px;text-align:center;pointer-events:none}
@@ -43,8 +45,8 @@
   @keyframes s{to{transform:rotate(360deg)}}
   .ptitle{position:absolute;top:0;left:0;right:0;padding:16px 20px;font-size:16px;font-weight:600;color:#fff;background:linear-gradient(180deg,rgba(0,0,0,.6),transparent);opacity:0;transition:opacity .2s;pointer-events:none;z-index:4}
   .stage.ui .ptitle{opacity:1}
-  .pctl{position:absolute;left:0;right:0;bottom:0;padding:26px 18px 14px;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent);display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .2s;z-index:4}
-  .stage.ui .pctl{opacity:1}
+  .pctl{position:absolute;left:0;right:0;bottom:0;padding:26px 18px 14px;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent);display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .2s;z-index:4;pointer-events:none}
+  .stage.ui .pctl{opacity:1;pointer-events:auto}
   .stage:fullscreen:not(.ui) video{cursor:none}          /* 全屏且鼠标静止(控制栏已隐藏)时隐藏光标,不挡画面;一动就随控制栏一起回来 */
   .stage:-webkit-full-screen:not(.ui) video{cursor:none}
   .pbtn{height:40px;min-width:40px;padding:0 8px;border:none;background:transparent;color:#fff;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:8px;white-space:nowrap}
@@ -61,6 +63,7 @@
   .pbtn:disabled{color:#5a6273;cursor:default}
   .pbtn:disabled:hover{background:transparent}
   .tm{color:#e8ebf2;font-size:14px;font-variant-numeric:tabular-nums;flex:none;min-width:56px;text-align:center}
+  .seekrow{flex:1;align-items:center;gap:12px;min-width:0}   /* 时间+进度条+总长 一组:窄屏时整组换到独立一行 */
   .seek{flex:1;min-width:80px;-webkit-appearance:none;height:6px;border-radius:3px;background:rgba(255,255,255,.28);outline:none;cursor:pointer}
   #seekTip{position:fixed;transform:translate(-50%,-100%);background:rgba(0,0,0,.88);color:#fff;font-size:14px;padding:4px 9px;border-radius:7px;pointer-events:none;z-index:12;display:none;font-variant-numeric:tabular-nums;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.5)}
   .seek::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#fff;cursor:pointer;box-shadow:0 0 0 3px rgba(59,130,246,.45)}
@@ -104,6 +107,50 @@
   #loginBox button:disabled{opacity:.55;cursor:default}
   #liErr{color:#ff6b6b;font-size:13px;min-height:16px;text-align:center}
   @keyframes sl{0%{margin-left:-30%}100%{margin-left:100%}}
+  /* ===== 手机/窄屏:DOM 不变,只用媒体查询改布局(和脚本里的 layoutMode() 一一对应) ===== */
+  @media (pointer:coarse){
+    *{-webkit-tap-highlight-color:transparent}
+    .search input{font-size:16px}                 /* iOS:小于16px聚焦会自动放大页面 */
+    .volsl,#volBtn{display:none!important}        /* 手机:音量走上下滑手势/实体键,不占控制栏 */
+    .row{padding:10px 11px}
+    .stage{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+    .sideToggle{opacity:0;pointer-events:none;width:26px;height:80px;font-size:20px}
+    .stage.ui .sideToggle,.stage:not(.vod):not(.live) .sideToggle{opacity:.85;pointer-events:auto}   /* 把手只随控制栏出现(不常驻挡画面);还没播放时常显 */
+  }
+  @media (max-width:900px),(max-height:520px){     /* 窄屏/矮屏:控制栏两行(进度一行、按钮一行),详情弹层全屏且字号收小 */
+    .pctl{flex-wrap:wrap;gap:0 4px;padding:10px 8px 6px}
+    .seekrow{flex:1 1 100%;order:-1;gap:8px}
+    .pbtn{height:34px;min-width:34px;padding:0 5px;font-size:17px}
+    .pbtn.txt{font-size:13px}
+    .tm{min-width:44px;font-size:13px}
+    #speed{padding:4px 4px;font-size:13px;margin-left:auto}
+    .ptitle{padding:10px 14px;font-size:14px}
+    .detail{position:fixed;inset:0;z-index:30;padding:14px 14px 24px}
+    .detail .head{gap:14px;margin-bottom:14px}
+    .detail .poster{width:96px;height:134px;border-radius:8px}
+    .detail h2{font-size:20px;margin-bottom:6px;padding-right:40px}
+    .detail .meta{font-size:13px;line-height:1.6;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}   /* 演员表很长:默认3行,点一下展开 */
+    .detail .meta.open{display:block;-webkit-line-clamp:unset}
+    .detail .desc{font-size:14px;line-height:1.6;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}   /* 简介默认4行,点一下展开 */
+    .detail .desc.open{display:block;-webkit-line-clamp:unset}
+    .detail .epstitle{font-size:14px;margin:10px 0}
+    .detail .eps{gap:16px 8px}
+    .detail .eps button{font-size:15px;padding:11px 8px;border-radius:8px}
+    .detail .close{top:6px;right:6px;font-size:24px;padding:6px 10px}
+  }
+  @media (orientation:portrait) and (max-width:760px){   /* 竖屏手机:上下堆叠——视频固定在顶部(16:9),节目栏占满下方;没有"收起侧栏"的概念 */
+    .app,.app.collapsed{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+    .main{order:1;aspect-ratio:16/9;max-height:56vh;height:auto}
+    .side{order:2;border-right:none;border-top:1px solid var(--line)}
+    .sideToggle{display:none}
+  }
+  @media (orientation:landscape) and (max-height:520px){   /* 横屏手机:视频铺满,节目栏变成左侧抽屉(开始播放自动收起;点遮罩或从左边缘右滑开合) */
+    .app,.app.collapsed{grid-template-columns:1fr}
+    .side{position:fixed;top:0;bottom:0;left:0;width:min(380px,100%);z-index:20;box-shadow:4px 0 24px rgba(0,0,0,.5);transition:transform .22s ease}
+    .app.collapsed .side{transform:translateX(-100%)}
+    .app:not(.collapsed)~.scrim{display:block}
+    .tabs button{padding:10px 0}
+  }
 </style></head><body>
 <div id="wake"><div class="logo2">📺 淘星TV</div>
   <div id="wakeProg"><div class="prog"><i></i></div><div class="step" id="wstep">正在唤醒…</div></div>
@@ -122,8 +169,8 @@
     <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名(中文)… 如 黄石"></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
   </aside>
   <section class="main">
-    <button class="sideToggle" id="sideTgl" onclick="toggleSide()" title="收起/展开节目栏">‹</button>
     <div class="stage" id="stage">
+      <button class="sideToggle" id="sideTgl" onclick="toggleSide()" title="收起/展开节目栏">‹</button>
       <video id="v" playsinline></video>
       <div class="hint" id="hint">← 从左侧选一个频道开始观看</div>
       <div class="ptitle" id="ptitle"></div>
@@ -133,9 +180,9 @@
         <button class="pbtn" id="ppBtn" title="播放/暂停(空格)">▶</button>
         <button class="pbtn txt vodOnly" id="prevBtn" title="上一集">⏮</button>
         <button class="pbtn txt vodOnly" id="nextBtn" title="下一集">⏭</button>
-        <span class="tm vodOnly" id="curT">0:00</span>
-        <input type="range" class="seek vodOnly" id="seek" min="0" max="1000" value="0"><div id="seekTip"></div>
-        <span class="tm vodOnly" id="totT">0:00</span>
+        <div class="seekrow vodOnly"><span class="tm" id="curT">0:00</span>
+        <input type="range" class="seek" id="seek" min="0" max="1000" value="0"><div id="seekTip"></div>
+        <span class="tm" id="totT">0:00</span></div>
         <span class="liveInd liveOnly" id="liveInd">● 直播中</span>
         <span style="flex:1" class="liveOnly"></span>
         <button class="pbtn" id="volBtn" title="静音">🔊</button>
@@ -147,16 +194,18 @@
             <div class="mitem on" id="mDialog" onclick="toggleDialog()"><span class="chk">✓</span><span>人声增强</span></div>
           </div>
         </div>
+        <button class="pbtn txt" id="rotBtn" title="横屏全屏" style="display:none">横屏</button>
         <button class="pbtn" id="fsBtn" title="全屏(双击画面)">⛶</button>
       </div>
       <div class="detail" id="detail"><button class="close" onclick="closeDetail()">✕</button>
         <div class="head"><div class="poster" id="dPoster"></div><div style="flex:1">
-          <h2 id="dTitle"></h2><div class="meta" id="dMeta"></div><div class="desc" id="dDesc"></div></div></div>
+          <h2 id="dTitle"></h2><div class="meta" id="dMeta" onclick="this.classList.toggle('open')"></div><div class="desc" id="dDesc" onclick="this.classList.toggle('open')"></div></div></div>
         <div class="epstitle">选集播放</div><div class="eps" id="dEps"></div>
       </div>
     </div>
   </section>
 </div>
+<div class="scrim" id="scrim" onclick="toggleSide()"></div>
 <script src="/mpegts.js"></script>
 <script>
 let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, filmsCache={};
@@ -170,6 +219,14 @@ function startWakeProg(){ wakeStart=Date.now(); wakeStep=''; if(wakeIv)clearInte
 function stopWakeProg(){ if(wakeIv){clearInterval(wakeIv);wakeIv=null;} }
 const jget=async(u,o)=>{ const r=await fetch(u,o); if(!r.ok){ let m=''; try{m=(await r.json()).error||'';}catch(e){} throw new Error('HTTP '+r.status+(m?': '+m:'')); } return r.json(); };
 const V=$('v'), STAGE=$('stage');
+// —— 手机/窄屏布局模式(和 <style> 里的媒体查询一一对应):stack=竖屏上下堆叠 / drawer=横屏抽屉 / desk=桌面两列 ——
+const MQ_STACK=matchMedia('(orientation:portrait) and (max-width:760px)'), MQ_DRAWER=matchMedia('(orientation:landscape) and (max-height:520px)');
+const isTouch=matchMedia('(pointer:coarse)').matches || location.search.indexOf('touch=1')>=0;   // touch=1:桌面浏览器调试手势用
+function layoutMode(){ return MQ_STACK.matches?'stack':(MQ_DRAWER.matches?'drawer':'desk'); }
+function onMQ(mq,fn){ if(mq.addEventListener) mq.addEventListener('change',fn); else mq.addListener(fn); }
+function updHint(){ const m=layoutMode(); $('hint').textContent = m==='stack' ? '↓ 从下方选一个频道开始观看' : (m==='drawer' ? '‹ 点左侧把手打开节目栏' : '← 从左侧选一个频道开始观看'); }
+onMQ(MQ_STACK,updHint); onMQ(MQ_DRAWER,e=>{ updHint(); if(e.matches&&player) setSide(true); });   // 转成横屏时正在播放:抽屉自动收起,别盖住画面
+updHint();
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
@@ -321,7 +378,8 @@ function renderDetail(){ if(!lastDetail)return; const {f,d}=lastDetail; const m=
   $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
   $('dDesc').textContent=m.content||''; const E=$('dEps'); E.innerHTML='';
   const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
-  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+Math.min(320,Math.max(76,maxLen*24+40))+'px,1fr))';
+  const narrow=matchMedia('(max-width:900px),(max-height:520px)').matches;   // 手机:字号小,格子也相应小
+  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+(narrow?Math.min(200,Math.max(64,maxLen*16+22)):Math.min(320,Math.max(76,maxLen*24+40)))+'px,1fr))';
   const lastEp=(LS.get('txtv_lastep',{}))[f.playid];   // 本片上次看到的集(undefined=没看过)
   eps.forEach((ep,i)=>{ const cell=document.createElement('div'); cell.className='epcell';
     const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
@@ -345,10 +403,13 @@ $('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(resumePctFor(cu
 $('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(resumePctFor(curFilm.playid,curEpIdx));} };
 // 通用播放
 function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
-function toggleSide(){ const app=document.querySelector('.app'); const c=app.classList.toggle('collapsed'); $('sideTgl').textContent=c?'›':'‹'; try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} }
-try{ if(localStorage.getItem('txtv_side')==='1'){ document.querySelector('.app').classList.add('collapsed'); $('sideTgl').textContent='›'; } }catch(e){}
+function setSide(collapsed){ document.querySelector('.app').classList.toggle('collapsed',collapsed); $('sideTgl').textContent=collapsed?'›':'‹'; }
+function toggleSide(){ const c=!document.querySelector('.app').classList.contains('collapsed'); setSide(c);
+  if(layoutMode()==='desk'){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面记忆开合;手机抽屉按场景自动开合,不记忆
+try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
 function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
+  if(layoutMode()==='drawer') setSide(true);   // 横屏手机:一开始播放就把抽屉收起来
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
   if(player){try{player.destroy()}catch(e){}player=null;}
   // 直播和点播都是"连续流"(点播靠 percent 重启来跳转),统一用 isLive:true 避免 VOD 模式的 range 请求/缓冲上限关连接
@@ -376,13 +437,44 @@ let uiTimer=null;
 function flashUI(){ if(!player)return; STAGE.classList.add('ui'); clearTimeout(uiTimer); uiTimer=setTimeout(()=>{ if(!V.paused)STAGE.classList.remove('ui'); },2600); }
 STAGE.addEventListener('mousemove',flashUI);
 $('pctl').addEventListener('mousemove',e=>e.stopPropagation());
+$('pctl').addEventListener('touchstart',()=>flashUI(),{passive:true});   // 手机:碰到控制栏就续显
 V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui'); });
 // —— 单击暂停 / 双击全屏 ——
 let clickTimer=null;
-STAGE.addEventListener('click',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.ptitle'))return;
+STAGE.addEventListener('click',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.ptitle')||e.target.closest('.sideToggle'))return;
   if(clickTimer){clearTimeout(clickTimer);clickTimer=null;return;}
   clickTimer=setTimeout(()=>{ clickTimer=null; if(player) togglePP(); },230); });
-STAGE.addEventListener('dblclick',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail'))return; toggleFS(); });
+STAGE.addEventListener('dblclick',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.sideToggle'))return; toggleFS(); });
+// —— 手机手势(仅触屏):单击=暂停/播放(并显示控制栏)  左/右半屏双击=∓15秒(连点累加)
+//    横向拖=拖进度(松手才取流)  纵向拖=音量  横屏抽屉模式从左边缘右滑=打开节目栏 ——
+if(isTouch){
+  let tS=null, tapT=0, tapTimer=null;   // tS:本次触摸 {x,y,t,mode,pos,vol,rect,target}
+  const noGesture=el=>el.closest('.pctl')||el.closest('.detail')||el.closest('.sideToggle')||el.closest('.ptitle');
+  STAGE.addEventListener('touchstart',e=>{ if(e.touches.length!==1||noGesture(e.target)){ tS=null; return; }
+    const t=e.touches[0]; tS={x:t.clientX,y:t.clientY,t:Date.now(),mode:null,pos:vodBase+V.currentTime,vol:curVol,rect:STAGE.getBoundingClientRect(),target:null}; },{passive:true});
+  STAGE.addEventListener('touchmove',e=>{ if(!tS) return; const t=e.touches[0]; const dx=t.clientX-tS.x, dy=t.clientY-tS.y;
+    if(!tS.mode){ if(Math.hypot(dx,dy)<12) return;
+      if(layoutMode()==='drawer' && tS.x-tS.rect.left<28 && dx>0){ tS.mode='drawer'; setSide(false); }   // 左边缘右滑:拉出抽屉
+      else if(!player) tS.mode='none';
+      else if(Math.abs(dx)>Math.abs(dy)) tS.mode=(isLiveNow||!vodDur)?'none':'seek';
+      else tS.mode='vol'; }
+    if(tS.mode==='seek'){ const target=Math.max(0,Math.min(vodDur-1, tS.pos + dx/tS.rect.width*240));   // 整个屏宽=4分钟
+      tS.target=target; dragging=true; $('seek').value=target; $('curT').textContent=fmt(target); updateSeekBar(); flashUI();
+      const d=target-tS.pos; pop((d>=0?'⏩ +':'⏪ −')+fmt(Math.abs(d))+'   '+fmt(target),1500); }
+    else if(tS.mode==='vol'){ setVolAbs(tS.vol - dy/(tS.rect.height*0.7)); }   // 上滑变大:7成屏高=0→100%
+    e.preventDefault(); },{passive:false});
+  STAGE.addEventListener('touchend',e=>{ if(!tS) return; const s=tS; tS=null; e.preventDefault();   // 阻止浏览器再合成 click/dblclick(桌面那套点击逻辑不重复触发)
+    if(s.mode==='seek'){ dragging=false; if(s.target!=null) commitSeek(s.target); return; }
+    if(s.mode) return;                                   // 音量/抽屉/无效拖动:结束即可
+    if(Date.now()-s.t>350) return;                       // 长按:不动作
+    const now=Date.now(), x=e.changedTouches[0].clientX-s.rect.left;
+    if(now-tapT<320){ tapT=now; clearTimeout(tapTimer); tapTimer=null;   // 双击/连点:按落点在左/右半屏决定方向,连点累加(seekBy 自带合并,停手后一次取流)
+      if(player&&!isLiveNow&&vodDur){ seekBy(x<s.rect.width/2?-15:15); const d=seekTarget-(vodBase+V.currentTime); pop((d>=0?'⏩ +':'⏪ −')+fmt(Math.abs(d)),900); }
+      return; }
+    tapT=now; clearTimeout(tapTimer);
+    tapTimer=setTimeout(()=>{ tapTimer=null; if(player){ togglePP(); flashUI(); } },320); },{passive:false});   // 单击:等320ms确认不是双击,再暂停/播放
+  STAGE.addEventListener('touchcancel',()=>{ if(tS&&tS.mode==='seek'){ dragging=false; updateSeekBar(); } tS=null; },{passive:true});
+}
 // —— 控件 ——
 function togglePP(){ if(!player)return; if(V.paused)V.play(); else V.pause(); }
 $('ppBtn').onclick=togglePP;
@@ -390,13 +482,40 @@ V.addEventListener('play',()=>{$('ppBtn').textContent='⏸';});
 V.addEventListener('pause',()=>{$('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState();});
 $('speed').onchange=e=>{ curSpeed=parseFloat(e.target.value); V.playbackRate=curSpeed; };
 $('fsBtn').onclick=toggleFS;
-function toggleFS(){ if(document.fullscreenElement){document.exitFullscreen();} else {STAGE.requestFullscreen&&STAGE.requestFullscreen();} }
-document.addEventListener('fullscreenchange',()=>{ $('fsBtn').textContent=document.fullscreenElement?'🗗':'⛶'; });
-$('vol').addEventListener('input',e=>{ V.volume=parseFloat(e.target.value); V.muted=V.volume===0; updVolIcon(); });
-$('volBtn').onclick=()=>{ V.muted=!V.muted; $('vol').value=V.muted?0:V.volume; updVolIcon(); };
-function updVolIcon(){ $('volBtn').textContent=(V.muted||V.volume===0)?'🔇':(V.volume<0.5?'🔉':'🔊'); }
-function setVol(delta){ V.muted=false; V.volume=Math.max(0,Math.min(1,+(V.volume+delta).toFixed(2))); $('vol').value=V.volume; updVolIcon();
-  const p=$('volpop'); p.textContent='🔊 '+Math.round(V.volume*100)+'%'; p.classList.add('show'); clearTimeout(p._t); p._t=setTimeout(()=>p.classList.remove('show'),700); }
+function fsEl(){ return document.fullscreenElement||document.webkitFullscreenElement||null; }
+async function enterFS(){   // 返回是否进入了全屏
+  try{ if(STAGE.requestFullscreen){ await STAGE.requestFullscreen({navigationUI:'hide'}); return true; }
+       if(STAGE.webkitRequestFullscreen){ STAGE.webkitRequestFullscreen(); return true; } }catch(e){ console.warn('fullscreen',e); }
+  try{ if(V.webkitEnterFullscreen){ V.webkitEnterFullscreen(); return true; } }catch(e){}   // 老 iPhone Safari 不支持元素全屏:退回视频原生全屏
+  return false; }
+function exitFS(){ try{ if(document.exitFullscreen) document.exitFullscreen(); else if(document.webkitExitFullscreen) document.webkitExitFullscreen(); }catch(e){} }
+function toggleFS(){ if(fsEl()) exitFS(); else enterFS(); }
+// 手机的横/竖屏全屏:⛶=全屏但跟随手机当前方向(竖着拿就是竖屏全屏);"横屏"=全屏并锁定横屏,再按切成锁定竖屏;退出全屏即解锁。
+// iOS 没有方向锁定 API(按钮不显示),靠旋转手机。
+const canLockOrient=!!(screen.orientation&&screen.orientation.lock);
+let orientLock='';
+if(isTouch&&canLockOrient) $('rotBtn').style.display='';
+async function toggleOrient(){ const want=orientLock==='landscape'?'portrait':'landscape';
+  if(!fsEl() && !(await enterFS())) return;
+  try{ await screen.orientation.lock(want); orientLock=want; }
+  catch(e){ console.warn('orientation lock',e); orientLock=''; pop('请旋转手机(并关闭方向锁定)',1500); }
+  $('rotBtn').textContent=orientLock==='landscape'?'竖屏':'横屏'; }
+$('rotBtn').onclick=toggleOrient;
+function onFSChange(){ const on=!!fsEl(); $('fsBtn').textContent=on?'🗗':'⛶';
+  if(!on){ orientLock=''; $('rotBtn').textContent='横屏'; try{ screen.orientation.unlock(); }catch(e){} } }
+document.addEventListener('fullscreenchange',onFSChange); document.addEventListener('webkitfullscreenchange',onFSChange);
+// iOS 不允许网页改 video.volume(设了读回来仍是1):那就改 Web Audio 链路末端的总增益,效果一样
+const volumeSettable=(()=>{ try{ const o=V.volume; V.volume=0.37; const ok=Math.abs(V.volume-0.37)<0.01; V.volume=o; return ok; }catch(e){ return false; } })();
+let curVol=1;
+function applyVol(v){ curVol=Math.max(0,Math.min(1,+(+v).toFixed(2))); V.muted=false;
+  if(volumeSettable) V.volume=curVol; else { initAudioOnce(); if(masterGain) masterGain.gain.value=curVol; }
+  $('vol').value=curVol; updVolIcon(); }
+function pop(text,ms){ const p=$('volpop'); p.textContent=text; p.classList.add('show'); clearTimeout(p._t); p._t=setTimeout(()=>p.classList.remove('show'),ms||700); }
+$('vol').addEventListener('input',e=>{ applyVol(parseFloat(e.target.value)); V.muted=curVol===0; updVolIcon(); });
+$('volBtn').onclick=()=>{ V.muted=!V.muted; $('vol').value=V.muted?0:curVol; updVolIcon(); };
+function updVolIcon(){ $('volBtn').textContent=(V.muted||curVol===0)?'🔇':(curVol<0.5?'🔉':'🔊'); }
+function setVolAbs(v){ applyVol(v); pop('🔊 '+Math.round(curVol*100)+'%'); }
+function setVol(delta){ setVolAbs(curVol+delta); }
 let saveTimer=null, lastSave=0;
 function updateSeekBar(){ if(isLiveNow||!curFilm)return; const dur=vodDur||1;
   const cur=dragging?parseFloat($('seek').value||0):(vodBase+V.currentTime);
@@ -408,7 +527,7 @@ V.addEventListener('progress',updateSeekBar);
 V.addEventListener('timeupdate',()=>{ if(!dragging&&curFilm&&!isLiveNow){ const pos=vodBase+V.currentTime; if(recoverTimes && pos>recoverPos+10){ recoverTimes=0; }  // 播放真往前推进了 => 上次中断已恢复,重置恢复计数(原地循环重取因为没进展不会被清,最终触发上限停下)
   $('seek').value=pos; $('curT').textContent=fmt(pos); updateSeekBar();
   const now=Date.now(); if(now-lastSave>3000){ lastSave=now; saveState(); } } });   // 节流:播放中每3秒真正存一次进度(原来是防抖,播放中永不触发)
-$('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); });
+$('seek').addEventListener('input',()=>{ dragging=true; $('curT').textContent=fmt($('seek').value); updateSeekBar(); flashUI(); });
 $('seek').addEventListener('change',()=>{ dragging=false; commitSeek(parseFloat($('seek').value)); });
 $('seek').addEventListener('mousemove',e=>{ if(isLiveNow||!vodDur){ $('seekTip').style.display='none'; return; }
   const r=$('seek').getBoundingClientRect(); const frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
@@ -456,14 +575,14 @@ function userAction(){ if(fromRecovery) return; recoverTimes=0; lastRecover=0; p
   if(recoverTimer){ clearTimeout(recoverTimer); recoverTimer=null; } recovering=false; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
-  else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} } }
+  else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); STAGE.classList.add('ui'); if(player){try{player.destroy()}catch(e){}player=null;} } }
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
   if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime) >= vodDur*0.98){ atEnd(); return; }   // 到片尾=真结束,下一集;其余一律当故障重取续播
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
   recoverPos = isLiveNow?0:Math.max(pendingResumeAt||0, vodBase+V.currentTime);
   if(recoverTimes>14){   // 退避重试约2分钟仍不行才放弃(服务端遇到坏引擎会冷重启自愈,约需40-60秒,必须等得起)
-    $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
+    $('loadtx').textContent='播放中断，请重选节目'; $('load').classList.add('show'); STAGE.classList.add('ui'); if(player){try{player.destroy()}catch(e){}player=null;} return; }
   recovering=true; $('load').classList.add('show');
   $('loadtx').textContent = recoverTimes<=3 ? '恢复中…' : '引擎恢复中，请稍候…';
   // 关键:恢复等待期间视频停在流开头,若此时又断一次,不能用当前位置当目标(会倒退丢掉原中断点),
@@ -512,20 +631,23 @@ V.addEventListener('waiting', ()=>{ if(player&&!recovering){ $('loadtx').textCon
 V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); wdStall=0; });   // 不在这清 recoverTimes(会被"每次只播几秒的重取循环"绕过);改由 timeupdate 按真实进展清
 
 // —— 人声增强(Web Audio 动态范围压缩) ——
-let audioCtx=null, srcNode=null, compNode=null, gainNode=null, audioReady=false;
+let audioCtx=null, srcNode=null, compNode=null, gainNode=null, masterGain=null, audioReady=false;
 let dialogMode = LS.get('txtv_dialog', true); // 默认开启,只做选择性关闭
 function setupAudio(){ if(audioCtx)return true;
   try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)();
     srcNode=audioCtx.createMediaElementSource(V); compNode=audioCtx.createDynamicsCompressor(); gainNode=audioCtx.createGain();
+    masterGain=audioCtx.createGain(); masterGain.gain.value=volumeSettable?1:curVol; masterGain.connect(audioCtx.destination);
     routeAudio(); return true; }catch(e){ console.warn('audio setup fail',e); return false; } }
 function routeAudio(){ if(!audioCtx)return;
   try{ srcNode.disconnect(); compNode.disconnect(); gainNode.disconnect(); }catch(e){}
   if(dialogMode){ compNode.threshold.value=-45; compNode.knee.value=30; compNode.ratio.value=12; compNode.attack.value=0.003; compNode.release.value=0.25; gainNode.gain.value=1.7;
-    srcNode.connect(compNode); compNode.connect(gainNode); gainNode.connect(audioCtx.destination); }
-  else { srcNode.connect(audioCtx.destination); } }
+    srcNode.connect(compNode); compNode.connect(gainNode); gainNode.connect(masterGain); }
+  else { srcNode.connect(masterGain); } }
 // 首次用户交互时初始化音频(浏览器策略要求手势),默认按 dialogMode 生效
 function initAudioOnce(){ if(audioReady)return; audioReady=true; setupAudio(); if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume(); }
 document.addEventListener('click', initAudioOnce, {once:true, capture:true});
+document.addEventListener('touchend', initAudioOnce, {once:true, capture:true, passive:true});
+document.addEventListener('touchend', ()=>{ if(audioCtx&&audioCtx.state!=='running'){ try{ audioCtx.resume().catch(()=>{}); }catch(e){} } }, {capture:true, passive:true});   // iOS 切后台会把 AudioContext 挂起,回来一碰就恢复
 document.addEventListener('keydown', initAudioOnce, {once:true, capture:true});
 function toggleDialog(){ if(!setupAudio())return; if(audioCtx.state==='suspended')audioCtx.resume(); dialogMode=!dialogMode; routeAudio(); LS.set('txtv_dialog',dialogMode); $('mDialog').classList.toggle('on',dialogMode); }
 $('moreBtn').onclick=(e)=>{ e.stopPropagation(); $('mDialog').classList.toggle('on',dialogMode); $('moreMenu').classList.toggle('show'); };
