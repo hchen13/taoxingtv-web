@@ -34,7 +34,8 @@
   .main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:#000;position:relative}
   .sideToggle{position:absolute;left:0;top:50%;transform:translateY(-50%);z-index:5;width:20px;height:64px;background:rgba(0,0,0,.45);color:#fff;border:none;border-radius:0 9px 9px 0;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;opacity:.28;transition:opacity .2s,background .2s}
   .sideToggle:hover{opacity:.95;background:rgba(0,0,0,.72)}
-  .stage:fullscreen .sideToggle,.stage:-webkit-full-screen .sideToggle{display:none}
+  .app:fullscreen .sideToggle,.app:-webkit-full-screen .sideToggle{opacity:0;pointer-events:none}   /* 全屏里把手只随控制栏出现,不常驻挡画面 */
+  .app:fullscreen .stage.ui .sideToggle,.app:-webkit-full-screen .stage.ui .sideToggle,.app:fullscreen .stage:not(.vod):not(.live) .sideToggle{opacity:.85;pointer-events:auto}
   .scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:19;display:none}   /* 横屏手机抽屉打开时盖住画面,点一下收起 */
   .stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden}
   video{width:100%;height:100%;background:#000;object-fit:contain}
@@ -47,8 +48,8 @@
   .stage.ui .ptitle{opacity:1}
   .pctl{position:absolute;left:0;right:0;bottom:0;padding:26px 18px 14px;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent);display:flex;align-items:center;gap:12px;opacity:0;transition:opacity .2s;z-index:4;pointer-events:none}
   .stage.ui .pctl{opacity:1;pointer-events:auto}
-  .stage:fullscreen:not(.ui) video{cursor:none}          /* 全屏且鼠标静止(控制栏已隐藏)时隐藏光标,不挡画面;一动就随控制栏一起回来 */
-  .stage:-webkit-full-screen:not(.ui) video{cursor:none}
+  .app:fullscreen .stage:not(.ui) video{cursor:none}          /* 全屏且鼠标静止(控制栏已隐藏)时隐藏光标,不挡画面;一动就随控制栏一起回来 */
+  .app:-webkit-full-screen .stage:not(.ui) video{cursor:none}
   .pbtn{height:40px;min-width:40px;padding:0 8px;border:none;background:transparent;color:#fff;font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:8px;white-space:nowrap}
   .pbtn:hover{background:rgba(255,255,255,.15)}
   .pbtn.txt{font-size:14px}
@@ -144,13 +145,15 @@
     .side{order:2;border-right:none;border-top:1px solid var(--line)}
     .sideToggle{display:none}
   }
-  @media (orientation:landscape) and (max-height:520px){   /* 横屏手机:视频铺满,节目栏变成左侧抽屉(开始播放自动收起;点遮罩或从左边缘右滑开合) */
-    .app,.app.collapsed{grid-template-columns:1fr}
-    .side{position:fixed;top:0;bottom:0;left:0;width:min(380px,100%);z-index:20;box-shadow:4px 0 24px rgba(0,0,0,.5);transition:transform .22s ease}
-    .app.collapsed .side{transform:translateX(-100%)}
-    .app:not(.collapsed)~.scrim{display:block}
-    .tabs button{padding:10px 0}
-  }
+  /* 抽屉模式(脚本按"横屏手机 或 全屏中"给 .app 加 drawer 类):视频铺满,节目栏变左侧抽屉——开始播放自动收起;点把手或从左边缘右滑拉出;点遮罩或在抽屉上左滑收起。
+     竖屏常规模式不用它(保持上下堆叠),竖屏进了全屏才用。放在所有媒体查询之后以便覆盖堆叠规则 */
+  .app.drawer,.app.drawer.collapsed{grid-template-columns:1fr;grid-template-rows:1fr}
+  .app.drawer .main{order:0;aspect-ratio:auto;max-height:none}
+  .app.drawer .side{position:fixed;top:0;bottom:0;left:0;width:min(380px,86%);z-index:20;box-shadow:4px 0 24px rgba(0,0,0,.5);transition:transform .22s ease;border-top:none;border-right:1px solid var(--line)}
+  .app.drawer.collapsed .side{transform:translateX(-100%)}
+  .app.drawer:not(.collapsed) .scrim{display:block}
+  .app.drawer .tabs button{padding:10px 0}
+  .app.drawer .sideToggle{display:flex}
 </style></head><body>
 <div id="wake"><div class="logo2">📺 淘星TV</div>
   <div id="wakeProg"><div class="prog"><i></i></div><div class="step" id="wstep">正在唤醒…</div></div>
@@ -204,8 +207,8 @@
       </div>
     </div>
   </section>
+  <div class="scrim" id="scrim" onclick="toggleSide()"></div>
 </div>
-<div class="scrim" id="scrim" onclick="toggleSide()"></div>
 <script src="/mpegts.js"></script>
 <script>
 let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, filmsCache={};
@@ -219,14 +222,17 @@ function startWakeProg(){ wakeStart=Date.now(); wakeStep=''; if(wakeIv)clearInte
 function stopWakeProg(){ if(wakeIv){clearInterval(wakeIv);wakeIv=null;} }
 const jget=async(u,o)=>{ const r=await fetch(u,o); if(!r.ok){ let m=''; try{m=(await r.json()).error||'';}catch(e){} throw new Error('HTTP '+r.status+(m?': '+m:'')); } return r.json(); };
 const V=$('v'), STAGE=$('stage');
-// —— 手机/窄屏布局模式(和 <style> 里的媒体查询一一对应):stack=竖屏上下堆叠 / drawer=横屏抽屉 / desk=桌面两列 ——
+// —— 布局模式:stack=竖屏上下堆叠(纯媒体查询) / drawer=抽屉(横屏手机,或任何设备全屏中;脚本给 .app 加 drawer 类) / desk=桌面两列 ——
+const APP=document.querySelector('.app');
 const MQ_STACK=matchMedia('(orientation:portrait) and (max-width:760px)'), MQ_DRAWER=matchMedia('(orientation:landscape) and (max-height:520px)');
 const isTouch=matchMedia('(pointer:coarse)').matches || location.search.indexOf('touch=1')>=0;   // touch=1:桌面浏览器调试手势用
 function layoutMode(){ return MQ_STACK.matches?'stack':(MQ_DRAWER.matches?'drawer':'desk'); }
+function inDrawer(){ return APP.classList.contains('drawer'); }
+function applyLayout(){ APP.classList.toggle('drawer', layoutMode()==='drawer' || !!fsEl()); updHint(); }   // 全屏中一律抽屉:视频铺满,节目栏从左侧拉出
 function onMQ(mq,fn){ if(mq.addEventListener) mq.addEventListener('change',fn); else mq.addListener(fn); }
-function updHint(){ const m=layoutMode(); $('hint').textContent = m==='stack' ? '↓ 从下方选一个频道开始观看' : (m==='drawer' ? '‹ 点左侧把手打开节目栏' : '← 从左侧选一个频道开始观看'); }
-onMQ(MQ_STACK,updHint); onMQ(MQ_DRAWER,e=>{ updHint(); if(e.matches&&player) setSide(true); });   // 转成横屏时正在播放:抽屉自动收起,别盖住画面
-updHint();
+function updHint(){ const m=inDrawer()?'drawer':layoutMode(); $('hint').textContent = m==='stack' ? '↓ 从下方选一个频道开始观看' : (m==='drawer' ? '‹ 点左侧把手打开节目栏' : '← 从左侧选一个频道开始观看'); }
+onMQ(MQ_STACK,applyLayout); onMQ(MQ_DRAWER,e=>{ applyLayout(); if(e.matches&&player) setSide(true); });   // 转成横屏时正在播放:抽屉自动收起,别盖住画面
+applyLayout();
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
@@ -403,13 +409,13 @@ $('prevBtn').onclick=()=>{ if(curEpIdx>0){curEpIdx--;playEpisode(resumePctFor(cu
 $('nextBtn').onclick=()=>{ if(curEpIdx<curEps.length-1){curEpIdx++;playEpisode(resumePctFor(curFilm.playid,curEpIdx));} };
 // 通用播放
 function mark(id){ id=String(id); document.querySelectorAll('.row').forEach(x=>x.classList.toggle('on',x.dataset.id===id)); }
-function setSide(collapsed){ document.querySelector('.app').classList.toggle('collapsed',collapsed); $('sideTgl').textContent=collapsed?'›':'‹'; }
-function toggleSide(){ const c=!document.querySelector('.app').classList.contains('collapsed'); setSide(c);
-  if(layoutMode()==='desk'){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面记忆开合;手机抽屉按场景自动开合,不记忆
+function setSide(collapsed){ APP.classList.toggle('collapsed',collapsed); $('sideTgl').textContent=collapsed?'›':'‹'; }
+function toggleSide(){ const c=!APP.classList.contains('collapsed'); setSide(c);
+  if(layoutMode()==='desk' && !fsEl()){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面常规模式记忆开合;抽屉(手机/全屏)按场景自动开合,不记忆
 try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
 function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
-  if(layoutMode()==='drawer') setSide(true);   // 横屏手机:一开始播放就把抽屉收起来
+  if(inDrawer()) setSide(true);   // 抽屉模式(横屏手机/全屏中):一开始播放就把抽屉收起来
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
   if(player){try{player.destroy()}catch(e){}player=null;}
   // 直播和点播都是"连续流"(点播靠 percent 重启来跳转),统一用 isLive:true 避免 VOD 模式的 range 请求/缓冲上限关连接
@@ -454,7 +460,7 @@ if(isTouch){
     const t=e.touches[0]; tS={x:t.clientX,y:t.clientY,t:Date.now(),mode:null,pos:vodBase+V.currentTime,vol:curVol,rect:STAGE.getBoundingClientRect(),target:null}; },{passive:true});
   STAGE.addEventListener('touchmove',e=>{ if(!tS) return; const t=e.touches[0]; const dx=t.clientX-tS.x, dy=t.clientY-tS.y;
     if(!tS.mode){ if(Math.hypot(dx,dy)<12) return;
-      if(layoutMode()==='drawer' && tS.x-tS.rect.left<28 && dx>0){ tS.mode='drawer'; setSide(false); }   // 左边缘右滑:拉出抽屉
+      if(inDrawer() && tS.x-tS.rect.left<28 && dx>0){ tS.mode='drawer'; setSide(false); }   // 左边缘右滑:拉出抽屉
       else if(!player) tS.mode='none';
       else if(Math.abs(dx)>Math.abs(dy)) tS.mode=(isLiveNow||!vodDur)?'none':'seek';
       else tS.mode='vol'; }
@@ -474,6 +480,11 @@ if(isTouch){
     tapT=now; clearTimeout(tapTimer);
     tapTimer=setTimeout(()=>{ tapTimer=null; if(player){ togglePP(); flashUI(); } },320); },{passive:false});   // 单击:等320ms确认不是双击,再暂停/播放
   STAGE.addEventListener('touchcancel',()=>{ if(tS&&tS.mode==='seek'){ dragging=false; updateSeekBar(); } tS=null; },{passive:true});
+  // 抽屉上左滑 -> 收起(竖屏全屏时抽屉占86%宽,旁边的遮罩条很窄,左滑更顺手)
+  let dS=null; const SIDE=document.querySelector('.side');
+  SIDE.addEventListener('touchstart',e=>{ dS=(e.touches.length===1&&inDrawer())?{x:e.touches[0].clientX,y:e.touches[0].clientY}:null; },{passive:true});
+  SIDE.addEventListener('touchmove',e=>{ if(!dS) return; const dx=e.touches[0].clientX-dS.x, dy=e.touches[0].clientY-dS.y;
+    if(dx<-50 && Math.abs(dx)>Math.abs(dy)*1.5){ dS=null; setSide(true); } },{passive:true});
 }
 // —— 控件 ——
 function togglePP(){ if(!player)return; if(V.paused)V.play(); else V.pause(); }
@@ -484,8 +495,9 @@ $('speed').onchange=e=>{ curSpeed=parseFloat(e.target.value); V.playbackRate=cur
 $('fsBtn').onclick=toggleFS;
 function fsEl(){ return document.fullscreenElement||document.webkitFullscreenElement||null; }
 async function enterFS(){   // 返回是否进入了全屏
-  try{ if(STAGE.requestFullscreen){ await STAGE.requestFullscreen({navigationUI:'hide'}); return true; }
-       if(STAGE.webkitRequestFullscreen){ STAGE.webkitRequestFullscreen(); return true; } }catch(e){ console.warn('fullscreen',e); }
+  // 全屏的是整个 .app 而不是 .stage:这样全屏里节目栏还在(收成抽屉),不用退出全屏就能换台/换集
+  try{ if(APP.requestFullscreen){ await APP.requestFullscreen({navigationUI:'hide'}); return true; }
+       if(APP.webkitRequestFullscreen){ APP.webkitRequestFullscreen(); return true; } }catch(e){ console.warn('fullscreen',e); }
   try{ if(V.webkitEnterFullscreen){ V.webkitEnterFullscreen(); return true; } }catch(e){}   // 老 iPhone Safari 不支持元素全屏:退回视频原生全屏
   return false; }
 function exitFS(){ try{ if(document.exitFullscreen) document.exitFullscreen(); else if(document.webkitExitFullscreen) document.webkitExitFullscreen(); }catch(e){} }
@@ -501,8 +513,11 @@ async function toggleOrient(){ const want=orientLock==='landscape'?'portrait':'l
   catch(e){ console.warn('orientation lock',e); orientLock=''; pop('请旋转手机(并关闭方向锁定)',1500); }
   $('rotBtn').textContent=orientLock==='landscape'?'竖屏':'横屏'; }
 $('rotBtn').onclick=toggleOrient;
+let sideBeforeFS=false;
 function onFSChange(){ const on=!!fsEl(); $('fsBtn').textContent=on?'🗗':'⛶';
-  if(!on){ orientLock=''; $('rotBtn').textContent='横屏'; try{ screen.orientation.unlock(); }catch(e){} } }
+  if(on){ sideBeforeFS=APP.classList.contains('collapsed'); applyLayout(); setSide(true); }   // 进全屏:视频铺满,节目栏收成抽屉(点把手/左缘右滑拉出)
+  else { applyLayout(); setSide(layoutMode()==='desk' ? sideBeforeFS : (layoutMode()==='drawer' && !!player));   // 退出:桌面恢复进全屏前的开合;横屏手机播放中保持收起;竖屏堆叠不受 collapsed 影响
+    orientLock=''; $('rotBtn').textContent='横屏'; try{ screen.orientation.unlock(); }catch(e){} } }
 document.addEventListener('fullscreenchange',onFSChange); document.addEventListener('webkitfullscreenchange',onFSChange);
 // iOS 不允许网页改 video.volume(设了读回来仍是1):那就改 Web Audio 链路末端的总增益,效果一样
 const volumeSettable=(()=>{ try{ const o=V.volume; V.volume=0.37; const ok=Math.abs(V.volume-0.37)<0.01; V.volume=o; return ok; }catch(e){ return false; } })();
