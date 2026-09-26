@@ -7,6 +7,10 @@ const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const { pinyin } = require('pinyin-pro');
+// 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
+{ const _l=console.log.bind(console), _e=console.error.bind(console);
+  const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
+  console.log=(...a)=>_l(st(),...a); console.error=(...a)=>_e(st(),...a); }
 
 const ADB = process.env.ADB || 'adb';
 const EMULATOR = process.env.EMULATOR || 'emulator';
@@ -26,27 +30,32 @@ function readDevFile(dev){
     const buf = Buffer.from(b64.replace(/\s/g,''), 'base64'); return buf.length>0 ? buf : null;
   } catch(e){ return null; }
 }
-// FFmpeg 容错解码 + 硬件重编码;-readrate 1.0 按实时读(不追上P2P直播边缘),initial_burst 快读垫底
+// FFmpeg 容错解码 + 硬件重编码
 function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec){
-  // 直播:transient P2P 抖动时底层重连更顺;点播:绝不重连——EOF=内容真结束,重连会反复GET已结束端口把原生app打崩
-  // 直播:P2P抖动时底层重连更顺。
-  // 点播:同样开重连,并且开 reconnect_at_eof —— P2P在我们读到"已下载数据尽头"时会直接关掉连接,
-  // ffmpeg看到连接断=输入结束就退出,表现为"播着播着停下来缓冲/断流"。开了at_eof就变成"等一下再接着读",
-  // 正是应有的行为。真片尾不会无限重连:近片尾(nearEnd)由调用方关掉重连,且前端按时长/位置判定真结束。
-  // 点播绝不重连:实测 reconnect_at_eof 每次重连都立刻又EOF,毫无帮助;而反复GET已结束端口会伤原生引擎
+  // 直播:开 ffmpeg 底层重连,扛 P2P 抖动。
+  // 点播:不开重连。点播源的 HTTP 连接只在两种情况下结束:内容真到结尾,或它的 P2P 会话被 vodStop 掉。
+  // 连接断了由 serveStream 的 onSegEnd 负地续接(重新 vodStart + -ss 跳过重叠),ffmpeg 自己不重连。
   const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
-  // 点播:P2P会下载超前,用2x读+编码器全速产出,填出~30秒深缓冲吸收P2P抖动(像原生mpv,不卡);
-  // 直播:1x实时读 + 断供后 catchup 4x 把源的追赶突发拉进来回填(实测源快读不会EOF,稳定攒~11秒深缓冲),initial_burst 开台垫底
-  // 点播 1.5x:原生是 MediaPlayer 按实时速度读,从不追上P2P的下载进度。我们曾用2x想快点攒满60秒缓冲,
-  // 结果经常追到"已下载数据的尽头",ffmpeg把它当成流结束直接退出 -> 表现为"播着播着就停下来缓冲"。
-  // 1.5x 仍能慢慢攒出余量,又不容易撞尽头。
-  // 点播加 initial_burst 30:开头30秒内容不限速、有多快读多快,让预缓冲在源给力时几秒就填满(否则1.5x要等十几秒);
-  // 之后回到1.5x,既能慢慢攒余量又不容易追上P2P的下载进度
+  // 读速:
+  // 直播 1x 实时读 + 断供后 catchup 4x 回填 + initial_burst 开台垫底(实测稳定攒 ~11 秒深缓冲)。
+  // 点播固定 2x(比播放快一倍地攒缓冲,配合前端上报的 60 秒背压上限)。
+  // 2026-09-05 实测点播本地源的真实行为(直连原始端口,不经 ffmpeg):按下载进度供数,约 1MB/s 突发(约为 1.95Mbps 片源的 4 倍),
+  // 读到已下载尽头时**停顿几秒等下载,不关连接**;全速读 7 分钟、按 2x 码率限速读 150 秒、停读 60 秒再续读,都不断。
+  // 以前日志里大量"源断开于 6-11s"其实是服务端晚到的 stop() 把新会话停掉造成的(见 queueStop),不是读速问题。
+  // 所以历史上关于 EOF 的结论(reconnect_at_eof 无用 / initial_burst 撞 EOF / 2x 撞尽头)都是在那个 bug 存在时观察到的,不再当作依据;
+  // 读速本身不改(2x 保持),initial_burst 暂不加(未在无 bug 条件下重测,先不动)。
   const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15']
-                      : ['-readrate','2.0'];   // 点播固定2x:不能加 initial_burst(开头不限速猛读会瞬间追上P2P下载进度、直接撞EOF,实测1.7MB就断)
+                      : ['-readrate','2.0'];
+  // 视频编码:
+  // 直播固定 8M ABR(1080p59 高动态,同一好链路的直播观看,现状 OK)。
+  // 点播改恒定质量 -q:v + 限峰值 -maxrate/-bufsize:输出码率随内容复杂度自适应,绝不把低码率片源放大。
+  // 缘由(2026-09-10 实测):黄石S2E1 源仅 838Kbps/606p,旧的 -b:v 8M 把它硬编成 7.9Mbps、再叠 2x 读=峰值~16Mbps,
+  // 弱 Wi-Fi 的客户端撑不住->缓冲被反复抽干(电视原生直接放 838Kbps 故不卡)。同源实测 -q:v 55 只产出~2.3Mbps、
+  // 画质对 606p 绰绰有余;复杂 1080p 片会自然升到 -maxrate 3.5M 封顶。读速不动(2x),仍由前端 60s 背压节流。
+  // 若某设备仍卡,先把 -q:v 往下调(更省带宽)、再看 -maxrate;这是链路带宽问题,不是读速问题。
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
-    : ['-c:v','h264_videotoolbox','-b:v','8M','-g','60','-pix_fmt','yuv420p'];
+    : ['-c:v','h264_videotoolbox','-q:v','50','-maxrate','1500k','-bufsize','3M','-g','60','-pix_fmt','yuv420p'];   // 2026-09-11:硬封顶 1.5M。2.15M 时用户设备仍卡,diag 显示卡时缓冲贴0、输出~270KB/s(≈播放码率)、源不静默不节流=链路带宽波动掉到≈播放码率,缓冲攒不起;恢复瞬间输出冲595KB/s(~4.7M)证明链路好时能跑。降到远低于链路(接近原生838K鲁棒性)让弱链路波动时也能持续攒缓冲。代价:真高码率片被压1.5M略软(可靠性优先)。读速不动,这是带宽问题不是读速。
   const rwto = isLive ? ['-rw_timeout','30000000'] : [];   // 点播:根本不设读超时。ffmpeg只要连接(页面)还开着就一直活,暂停多久都不自杀;页面关/掉线→res close→teardown回收(见serveStream);真卡死(源挂/App崩)由前端看门狗冻结~24s重取兜底。直播保留30s,与-reconnect配套扛P2P抖动
   const seek = (skipSec>0.05) ? ['-ss', skipSec.toFixed(3)] : [];             // 续接时跳过与上一段重叠的部分,避免重复内容
   const tsoff = (tsOffsetSec>0.05) ? ['-output_ts_offset', tsOffsetSec.toFixed(3)] : [];  // 让新一段的时间戳接着上一段走,客户端看到的是一条连续的流
@@ -79,10 +88,17 @@ async function waitBootCompleted(timeoutMs=90000){ const t0=Date.now();
 function fridaServerUp(){ return /frida-server/.test(adbSu('pgrep -l frida-server || true')); }
 function appRunning(){ return adb(['shell','pidof',PKG]).trim().length>0; }
 
+// 停原生 P2P 会话(vodStop)必须防"晚到":stop 串进 streamMutex 队列时,队列里可能已排着新流的启动任务,
+// 于是 stop 在新流刚接通、刚出数据时才执行 -> 停掉的是**新**会话 -> 源把在途的几 MB 吐完就关连接。
+// 这就是日志里大量"源断开于 6-11s"、ffmpeg 报 Stream ends prematurely / Input-output error 的真正来源:
+// 实测正常读流 4 秒后调一次 vodStop,连接 4.6 秒后被关;而源本身全速读 7 分钟、停读 60 秒都不会断。
+// 所以 stop 真正执行前先核对 token:期间有更新的流启动过(token 变了)就作废——新流的 vodPlay 自己会先 vodStop 旧会话。
+function queueStop(token){ streamMutex = streamMutex.then(async()=>{ if(current.token!==token) return; try{ if(script) await script.exports.stop(); }catch(e){} }); }
 function cleanupCurrent(){
+  const tok=current.token;
   if(current.ff){ try{current.ff.kill('SIGKILL');}catch(e){} }
-  if(current.port){ streamMutex = streamMutex.then(async()=>{ try{ if(script) await script.exports.stop(); }catch(e){} }); adb(['forward','--remove','tcp:'+current.port]); }   // 同样串进队列,避免晚到的stop掐断下一路流
-  current={token:current.token, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+  if(current.port){ queueStop(tok); adb(['forward','--remove','tcp:'+current.port]); }
+  current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
 }
 
 let needColdRestart=false;
@@ -141,6 +157,19 @@ async function shutdownEmulator(reason){ if(state==='off')return; state='off'; c
   adb(['emu','kill']);
   for(let i=0;i<20 && emulatorRunning();i++){ await sleep(500); }  // 等模拟器真正退出,避免重启时新进程撞上正在死亡的模拟器
   bootStep=''; console.log('[engine] off (内存已释放)'); }
+// —— 诊断采样(排查频繁短缓冲):每3秒记 客户端缓冲curBuf / 是否节流 / 输出KB每秒。DIAG=0 关闭 ——
+if(process.env.DIAG!=='0'){ let _lastOut=0, _lastT=Date.now();
+  setInterval(()=>{ try{
+    if(current.ff && !current.ffExited && current.chid && (''+current.chid).startsWith('vod')){
+      const now=Date.now(); const dt=(now-_lastT)/1000||1; const ob=current.outTotal||0;
+      const kbps=Math.max(0,(ob-_lastOut))/1024/dt;
+      _lastOut=ob; _lastT=now;
+      const idle=(now-(current.lastData||now))/1000;
+      if(curBuf<15 || current.throttled || current.splicing || idle>3)   // 只在异常时记(健康稳态不刷屏)
+        console.log('[diag '+current.chid+'] 客户端缓冲='+curBuf.toFixed(0)+'s 节流='+(current.throttled?'是':'否')+' 续接='+(current.splicing?'是':'否')+' 输出='+kbps.toFixed(0)+'KB/s 源静默='+idle.toFixed(0)+'s');
+    } else { _lastOut=0; _lastT=Date.now(); }
+  }catch(e){} }, 3000);
+}
 // 空闲回收:有活动流时(current.ff)绝不关;否则超时关
 setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>IDLE_MS) shutdownEmulator('空闲超时'); }, 15000);
 
@@ -165,12 +194,11 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
       if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 等待期间又被取代且客户端已走,同上
       const hadStream=!!current.port; cleanupCurrent();
-      // 关键:必须**等**上一路 stop 真正执行完再起新流。之前 stop 是 fire-and-forget,
-      // 切集/重取时它可能在新的 vodStart 之后才到达 -> 把刚起来的新流停掉 ->
-      // 表现为"端口有效但30秒不出数据"(切下一集起不来的真凶)。await 后再 settle。
-      if(hadStream){ try{ if(script) await script.exports.stop(); }catch(e){} await sleep(700); }   // settle:给原生P2P引擎收尾时间,否则快速重取(seek)会拿到立即EOF的死端口
-      // 启动占位:上报 starting 让 /api/streamstate 显示 alive,避免前端看门狗在服务端重取期间误判"断流"来抢流
+      // 立刻用新 token 占位(在 stop/settle 之前):一来 /api/streamstate 立即显示 alive(starting),前端看门狗不会在重取期间误判断流来抢流;
+      // 二来上一路流若正在续接(onSegEnd),它每一步都核对 token,看到已换流就立刻作废,不会再去 vodStop/vodStart 干扰这一路
       current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
+      // 等上一路 P2P 会话真正 stop 完再起新流,并给原生引擎一点收尾时间(settle),否则快速重取(seek)可能拿到不出数据的死端口
+      if(hadStream){ try{ if(script) await script.exports.stop(); }catch(e){} await sleep(700); }
 
       const firstByteMs = 12000;   // 首字节耐心:实测健康时 2.5-3.5 秒出数据,12秒已是3倍余量。
       // (曾设成30秒想"更有耐心",结果每次失败都要干等30秒、拖慢每一次拖进度,是过度矫正)
@@ -251,26 +279,34 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       let outBytes=0;
       if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       // ——— 源断了由服务端无缝续接,客户端全程只看到一条不间断的流 ———
-      // P2P 会周期性主动关闭连接(实测直连原始端口也会:给十几MB就关)。以前这会让前端重建播放器、
-      // 丢掉几十秒已缓冲内容、黑屏重来。现在改由服务端处理:算出已经送出多少内容,重新取流并用
-      // -ss 跳过重叠部分、-output_ts_offset 接续时间戳,继续写进同一个HTTP响应。客户端无感。
+      // 源连接结束(真片尾之外)时:算出已经送出多少内容,重新取流并用 -ss 跳过重叠部分、-output_ts_offset 接续时间戳,
+      // 继续写进同一个 HTTP 响应,前端不重建播放器、不丢已缓冲内容。
+      // (根治晚到 stop 之后,源断开应当很少见;续接是兜底,所以必须可靠:有首字节门限、失败重试、全程有日志。)
       const durSec = (vod && vod.dur>0) ? vod.dur : 0;
       const segStartAbs = durSec ? (vod.percent/100*durSec) : 0;
-      let deliveredSec = 0, segOut = 0, splicing = false, finished = false;
+      let deliveredSec = 0, segOut = 0, splicing = false, finished = false, emptySplices = 0;
+      let wantSplice = false;   // 停滞检测主动 SIGKILL 当前段并要求续接时置真(否则 SIGKILL 一律视为我们主动拆流,不续接)
       const readProgress = (d)=>{ const m=(''+d).match(/out_time_us=(\d+)/g); if(m&&m.length){ const v=parseInt(m[m.length-1].split('=')[1],10); if(!isNaN(v)) segOut = v/1e6; } };
 
       const wire = (proc)=>{
-        proc.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken) current.lastData=now; if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });
+        proc.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken){ current.lastData=now; current.outTotal=(current.outTotal||0)+d.length; } if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });
         proc.stderr.on('data', readProgress);
         proc.stdout.pipe(res,{end:false});          // 不让某一段结束就把响应关掉
         proc.on('exit',(code,sig)=>{ onSegEnd(proc,sig); });
         proc.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); try{res.end();}catch(_){} });
       };
 
+      // 等某段 ffmpeg 出首字节:出了=true;先退出/超时=false
+      const waitFirstByte = (proc, ms) => new Promise(resolve=>{ let settled=false;
+        const done=(v)=>{ if(settled) return; settled=true; clearTimeout(t); proc.stdout.removeListener('data',onD); proc.removeListener('exit',onX); resolve(v); };
+        const onD=()=>done(true), onX=()=>done(false); const t=setTimeout(()=>done(false), ms);
+        proc.stdout.once('data',onD); proc.once('exit',onX); });
+
       async function onSegEnd(proc, sig){
         if(current.token===myToken) current.ffExited=true;
         if(finished || splicing) return;
-        if(sig==='SIGKILL') return;                                    // 我们主动拆的(seek/切集/客户端离开)
+        if(sig==='SIGKILL' && !wantSplice) return;                     // 我们主动拆的(seek/切集/客户端离开);停滞检测发起的 SIGKILL 例外,要续接
+        wantSplice=false;
         if(res.writableEnded || req.destroyed){ finished=true; return; }
         const segLen = segOut; deliveredSec += segOut; segOut = 0;
         const resumeAbs = segStartAbs + deliveredSec;
@@ -281,28 +317,44 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           console.log('['+label+'] 结束于 '+resumeAbs.toFixed(0)+'s'+(durSec?('/'+durSec+'s'):'')+(emptySplices>=3?'(连续取不到内容)':''));
           return;
         }
-        splicing = true;
+        if(current.token!==myToken){ finished=true; return; }         // 已有更新的流接管(用户刚好在此刻换流):本路作废,绝不能再去 stop(会停掉新流的会话)
+        splicing = true; current.splicing=true;                        // 续接期间 /api/streamstate 仍报 alive,前端别来抢流
         // 知道总时长就跳到最近的百分点(跳过的秒数少、续接快);不知道(老页面没传dur)就用同一个百分点跳过已播时长——同样正确,只是跳过得多一点
         const pct = durSec ? Math.max(0, Math.min(96, Math.floor(resumeAbs/durSec*100))) : vod.percent;
         const skip = durSec ? Math.max(0, resumeAbs - pct/100*durSec) : deliveredSec;
-        console.log('['+label+'] 源断开于 '+resumeAbs.toFixed(0)+'s -> 无缝续接(从'+pct+'%跳过'+skip.toFixed(0)+'s)');
+        console.log('['+label+'] 源断开于 '+resumeAbs.toFixed(0)+'s(本段供数 '+segLen.toFixed(0)+'s, 客户端缓冲 '+curBuf.toFixed(0)+'s) -> 无缝续接(从'+pct+'%跳过'+skip.toFixed(0)+'s)');
+        const t0=Date.now();
         try{
-          try{ if(script) await script.exports.stop(); }catch(e){}
-          await sleep(600);
-          await ensureReady();                       // 续接期间引擎可能已崩/被回收,先确保就绪(否则 script 为空直接抛错)
-          if(!script) throw new Error('引擎未就绪');
-          const r = await vod.mkPlay(pct);
-          if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
-          adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
-          if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
-          myPort = r.port;
-          const np = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec);
-          ff = np; if(current.token===myToken){ current.ff = np; current.port = r.port; current.ffExited=false; }
-          wire(np);
-          splicing = false;
+          let ok=false;
+          for(let attempt=1; attempt<=2 && !finished; attempt++){
+            if(current.token!==myToken){ finished=true; return; }     // 同上:换流了就作废
+            try{ if(script) await script.exports.stop(); }catch(e){}
+            await sleep(600);
+            await ensureReady();                       // 续接期间引擎可能已崩/被回收,先确保就绪(否则 script 为空直接抛错)
+            if(!script) throw new Error('引擎未就绪');
+            if(finished || res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
+            const r = await vod.mkPlay(pct);
+            if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
+            adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
+            if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
+            myPort = r.port;
+            const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec);
+            ff = cand;                                 // 立刻登记为当前段:客户端此刻离开时 teardown 才杀得到它
+            if(current.token===myToken){ current.ff = cand; current.port = r.port; current.ffExited=false; }
+            wire(cand);                                // 边等首字节边直接转发(不丢头);它若在 splicing 期间退出,onSegEnd 会直接返回,由这里的循环处理
+            ok = await waitFirstByte(cand, firstByteMs);
+            if(finished){ try{ cand.kill('SIGKILL'); }catch(e){} return; }   // 等首字节期间客户端走了
+            if(ok){ console.log('['+label+'] 续接成功 port '+r.port+',断开到出数据 '+((Date.now()-t0)/1000).toFixed(1)+'s'); break; }
+            console.log('['+label+'] 续接 port '+r.port+' '+(firstByteMs/1000)+'秒未出数据 '+attempt+'/2');
+            try{ cand.kill('SIGKILL'); }catch(e){}
+          }
+          if(finished) return;
+          if(!ok) throw new Error('续接多次无数据');
         }catch(e){
           console.error('['+label+'] 续接失败:', e&&(e.message||e));
-          splicing=false; finished=true; try{ res.end(); }catch(_){}   // 让前端按老路走恢复
+          finished=true; try{ res.end(); }catch(_){}   // 让前端按老路走恢复
+        }finally{
+          splicing=false; if(current.token===myToken) current.splicing=false;
         }
       }
 
@@ -319,16 +371,14 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           // 客户端暂停/缓冲充足时数据本就不该流动(背压),不能当成源哑了——否则会在用户暂停期间
           // 反复强行续接,把流反复重建、时间戳错乱(表现为画面卡住只剩声音)
           if(curBuf < 10 && !bufPaused && !splicing && !finished && current.lastData && Date.now()-current.lastData>20000){
-            console.log('['+label+'] 缓冲见底且源停滞20秒 -> 主动续接');
-            wantSplice=true; try{ ff.kill('SIGKILL'); }catch(e){}
+            console.log('['+label+'] 客户端缓冲仅 '+curBuf.toFixed(0)+'s 且源 20 秒无数据 -> 主动续接');
+            wantSplice=true; try{ ff.kill('SIGKILL'); }catch(e){}   // onSegEnd 见到 wantSplice 才会对 SIGKILL 续接(之前漏了这个判断,这里的 kill 只是把流杀死、从不续接,日志每秒刷一行)
           }
         }catch(e){}
       }, 1000);
-      // 拆掉正在播放的流(用户seek/切集换流时走这里)。stop 必须串进 streamMutex 队列:
-      // 之前是 fire-and-forget,会在下一路 vodStart 之后才执行 -> 把刚起来的新流掐断 ->
-      // 表现为"播几秒就断、反复重播同一段"(ffmpeg报 Stream ends prematurely)
+      // 拆掉正在播放的流(用户seek/切集换流、关页面时走这里)。
       const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false};
-        streamMutex = streamMutex.then(async()=>{ try{ if(script) await script.exports.stop(); }catch(e){} }); } };
+        queueStop(myToken); } };   // 排队 stop 时再次核对 token(见 queueStop):若此后已有新流启动,这个 stop 作废,否则会把新流的 P2P 会话停掉
       res.on('close',teardown); res.on('error',teardown);
     } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
       if(current.token===myToken && current.starting){ current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; }
@@ -343,11 +393,11 @@ const app = express();
 app.use(express.json());
 app.get('/', (req,res)=>{ res.set('Cache-Control','no-cache, no-store, must-revalidate'); res.sendFile(__dirname+'/public/index.html'); });
 app.get('/mpegts.js', (req,res)=>res.sendFile(__dirname+'/node_modules/mpegts.js/dist/mpegts.js'));
-app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting}));
+app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing}));
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着;恢复时前端据此判断要不要重连
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, curBuf, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着;恢复时前端据此判断要不要重连
 app.get('/api/buf', (req,res)=>{ curBuf=parseFloat(req.query.d)||0; res.json({ok:true}); });  // 前端上报点播缓冲深度
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——

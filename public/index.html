@@ -676,7 +676,7 @@ function startHeartbeat(){ setInterval(()=>{ if(!document.hidden) fetch('/api/he
 // 等缓冲越过中断位置、并且再往后攒够 RESUME_MARGIN 秒余量,才跳回中断处继续播。
 // 余量是关键:缓冲一到就播往往刚播就见底->又断->又回到那个百分点->死循环。
 let pendingResumeAt=0, pendingMargin=12, resumeLastBuf=0, resumeLastGrow=0;
-const RESUME_MARGIN=10, START_PREBUFFER=6;   // 预缓冲不能设太大:实测源每个连接只送约12MB就主动关闭,一次连接给的内容可能到不了20秒,门槛过高会永远攒不够而不开播(比不设门更糟)。6秒足以避免'一播就见底'——起播就播(canplay时只有1-2秒)必然放几秒就见底->卡顿->触发恢复(表现为"回退")
+const RESUME_MARGIN=10, START_PREBUFFER=6;   // 起播预缓冲 6 秒:起播就播(canplay 时只有 1-2 秒)必然放几秒就见底->卡顿->触发恢复(表现为"回退");也别设太大,拖长每次起播/跳转的等待。(旧注释说"源每个连接只送约12MB就关"是服务端晚到 stop 造成的假象,源本身不会主动关连接,见 server.js queueStop)
 setInterval(()=>{
   if(!pendingResumeAt || !player || isLiveNow || !curFilm) return;
   const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
