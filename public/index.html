@@ -264,7 +264,7 @@ async function afterLogin(){
   channels=d.live||[]; window.expiredTime=d.expiredTime||'';
   stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore();
 }
-function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; }
+function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; startHeartbeat(); }
 async function loginRequest(body){
   try{ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return await r.json(); }
   catch(e){ return {ok:false,error:'网络错误'}; }
@@ -272,7 +272,7 @@ async function loginRequest(body){
 async function doLogin(){
   const account=$('liAccount').value.trim(), password=$('liPassword').value.trim();
   if(!account||!password){ $('liErr').textContent='请输入账号和密码'; return; }
-  $('liBtn').disabled=true; $('liBtn').textContent='登录中…（约10-20秒）'; $('liErr').textContent='';
+  $('liBtn').disabled=true; $('liBtn').textContent='连接应用服务器中…'; $('liErr').textContent='';
   const r=await loginRequest({account,password});
   if(r.ok){ $('loginBox').style.display='none'; $('wakeProg').style.display=''; $('wstep').textContent='登录成功，加载中…'; await afterLogin(); }
   else { $('liErr').textContent=r.error||'登录失败'; $('liBtn').disabled=false; $('liBtn').textContent='登录'; }
@@ -669,7 +669,8 @@ $('moreBtn').onclick=(e)=>{ e.stopPropagation(); $('mDialog').classList.toggle('
 $('moreMenu').addEventListener('click',e=>e.stopPropagation());
 document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
 
-function startHeartbeat(){ setInterval(()=>{ if(!document.hidden) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }   // 只要页面开着就保活(不再要求有播放器):页面在就别释放引擎,否则刷新/播放中断后引擎被回收,再用要等一分钟冷启动
+let heartbeatTimer=null;
+function startHeartbeat(){ if(heartbeatTimer)return; heartbeatTimer=setInterval(()=>{ if(!document.hidden) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }   // 只要页面开着就保活
 // 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
 // —— 恢复不回头看 ——
 // 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,

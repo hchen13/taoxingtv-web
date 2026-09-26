@@ -81,6 +81,7 @@ let script=null, session=null, catalog=null;
 let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false };
 let curBuf=0;  // 前端上报的点播缓冲深度(秒),用于反馈节流
 let lastActivity=Date.now();
+let activeLogins=0;
 
 function emulatorRunning(){ return /emulator-\d+\s+device/.test(adb(['devices'])); }
 async function waitBootCompleted(timeoutMs=90000){ const t0=Date.now();
@@ -108,7 +109,9 @@ async function bootEmulator(){
   bootPromise=(async()=>{ state='booting';
     try {
       if(!emulatorRunning()){ bootStep='启动模拟器(全新冷启动)…';
-        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore'}); p.unref();   // -no-snapshot:每次全新冷启动,不加载/保存快照,不继承上次残留状态(登录仍在磁盘userdata里,会自动登录)
+        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore'});
+        await new Promise((resolve,reject)=>{ p.once('spawn',resolve); p.once('error',reject); });
+        p.unref();   // -no-snapshot:每次全新冷启动,不加载/保存快照,不继承上次残留状态(登录仍在磁盘userdata里,会自动登录)
         adb(['wait-for-device'],{timeout:120000}); }
       bootStep='等待系统就绪…'; await waitBootCompleted();
       bootStep='启动取流引擎…'; if(!fridaServerUp()){ adbSu('nohup '+FRIDA_BIN+' >/dev/null 2>&1 &'); await sleep(1500); }
@@ -118,14 +121,18 @@ async function bootEmulator(){
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
       if(coldLaunch){ bootStep='等待应用启动…'; await sleep(4000); }  // 短暂等应用进程起来再注入,随后按真实信号放行(不再盲等12s)
       bootStep='注入引擎…'; await attach();
-      if(coldLaunch){ bootStep='等待频道数据就绪…';   // 就绪门:等频道加载完成(icChart挂表成功的信号)。注:activatedTime(icAuth设备授权)在无头环境永远为0——那是HomeActivity的UI流程,我们绕过了界面直接Frida调vodStart,故不能作为门条件(实测等3分钟仍为0)
-        let rdy={};
-        for(let i=0;i<20;i++){ try{ rdy=await script.exports.engineReady(); }catch(e){ rdy={}; } if(rdy && rdy.channels>0) break; await sleep(1500); }
-        console.log('[engine] 频道就绪 ch='+(rdy.channels||0));
-        // 冷启动后必须自己挂表+授权:原生靠首页UI流程跑 icChart/icAuth,我们无头绕过了UI,
-        // 不做这步则 vodStart/playbackStart 一律返回 -1000(没授权),表现为"死端口/取不到流"
-        bootStep='挂表授权…';
-        try{ const a=await script.exports.reAuth(); console.log('[auth] 冷启动授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:'')); }catch(e){ console.log('[auth] 冷启动授权失败',e&&e.message); } }
+      if(coldLaunch){
+        let login=null; try{ login=await script.exports.loginState(); }catch(e){}
+        if(login && !login.account){ console.log('[engine] 等待网页登录'); }
+        else { bootStep='等待频道数据就绪…';   // 就绪门:等频道加载完成(icChart挂表成功的信号)。注:activatedTime(icAuth设备授权)在无头环境永远为0——那是HomeActivity的UI流程,我们绕过了界面直接Frida调vodStart,故不能作为门条件(实测等3分钟仍为0)
+          let rdy={};
+          for(let i=0;i<20;i++){ try{ rdy=await script.exports.engineReady(); }catch(e){ rdy={}; } if(rdy && rdy.channels>0) break; await sleep(1500); }
+          console.log('[engine] 频道就绪 ch='+(rdy.channels||0));
+          // 冷启动后必须自己挂表+授权:原生靠首页UI流程跑 icChart/icAuth,我们无头绕过了UI,
+          // 不做这步则 vodStart/playbackStart 一律返回 -1000(没授权),表现为"死端口/取不到流"
+          if(rdy.channels>0){ bootStep='挂表授权…';
+            try{ const a=await script.exports.reAuth(); console.log('[auth] 冷启动授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:'')); }catch(e){ console.log('[auth] 冷启动授权失败',e&&e.message); } }
+        } }
       state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
     } catch(e){ state='off'; bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
@@ -171,7 +178,7 @@ if(process.env.DIAG!=='0'){ let _lastOut=0, _lastT=Date.now();
   }catch(e){} }, 3000);
 }
 // 空闲回收:有活动流时(current.ff)绝不关;否则超时关
-setInterval(()=>{ if(state==='ready' && !current.ff && Date.now()-lastActivity>IDLE_MS) shutdownEmulator('空闲超时'); }, 15000);
+setInterval(()=>{ if(state==='ready' && !current.ff && activeLogins===0 && Date.now()-lastActivity>IDLE_MS) shutdownEmulator('空闲超时'); }, 15000);
 
 // ---------- 取流(直播/点播共用),token化+串行化 ----------
 let streamMutex=Promise.resolve();
@@ -416,6 +423,7 @@ app.post('/api/login', async (req,res)=>{
     try { const c = JSON.parse(fs.readFileSync(CREDS_FILE,'utf8')); account=c.account; password=c.password; } catch(e){ return res.status(500).json({error:'读取保存凭据失败'}); }
   } else { account=((req.body&&req.body.account)||'').trim(); password=((req.body&&req.body.password)||'').trim(); }
   if (!account || !password) return res.status(400).json({ error:'请输入账号和密码' });
+  activeLogins++; lastActivity=Date.now();
   try {
     await ensureReady();
     await script.exports.saveCreds(account, password);   // 写入 App 的 SharedPreferences
@@ -425,15 +433,23 @@ app.post('/api/login', async (req,res)=>{
     await sleep(1000);
     await bootEmulator();
     let st = { activated:false };
-    for (let i=0;i<15;i++){ try { st = await script.exports.loginState(); } catch(e){} if (st.activated) break; await sleep(2000); }
+    for (let i=0;i<45;i++){
+      try { st = await script.exports.loginState(); } catch(e){}
+      if (st.activated) break;
+      // 原生应用会依次尝试六条线路；等它给出最终结果，避免网页先报登录失败。
+      if (i%3===0 && /topResumedActivity=.*com\.wys\.iptvgo\/\.activity\.RescueActivity/.test(adb(['shell','dumpsys','activity','activities']))) break;
+      await sleep(2000);
+    }
     if (st.activated) {
       try { fs.writeFileSync(CREDS_FILE, JSON.stringify({ account, password }), { mode:0o600 }); } catch(e){}
       catalog = null;
       res.json({ ok:true, account });
     } else {
-      res.json({ ok:false, error:'登录失败:请检查账号密码,或该账号未授权此设备' });
+      console.log('[login] 原生应用未完成激活 channels='+(st.channels||0)+' accountLoaded='+!!st.account);
+      res.json({ ok:false, error:'淘星TV 应用未完成激活，未取得频道数据。请检查网络和代理，稍后重试；若仍失败，再核对账号及设备授权。' });
     }
   } catch(e){ res.status(500).json({ error: ''+(e.message||e) }); }
+  finally { activeLogins--; lastActivity=Date.now(); }
 });
 app.post('/api/logout', async (req,res)=>{
   try { await ensureReady();
@@ -504,10 +520,29 @@ app.get('/api/search', async (req,res)=>{
     if(hanMatch){ searchKey=toInitials(hanMatch[0]); filterTerm=hanMatch[0]; isName=true; }
     else { searchKey=q.toUpperCase().replace(/[^A-Z0-9]/g,''); filterTerm=q; isName=false; }
     if(!searchKey) return res.json({films:[], initials:''});
-    const raw=await script.exports.vodSearch('vod', searchKey, 'all', 0);
-    let data; try{ data=JSON.parse(raw); }catch(e){ return res.status(502).json({error:'搜索返回异常'}); }
-    let films=(data.filmlist||[]).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:f.type}));
-    if(isName){ const pre=films.filter(f=>(f.title||'').startsWith(filterTerm)); const inc=films.filter(f=>!(f.title||'').startsWith(filterTerm)&&(f.title||'').includes(filterTerm)); films=pre.concat(inc); }
+    const fetchFilms=async key=>{
+      const raw=await script.exports.vodSearch('vod',key,'all',0);
+      let data; try{ data=JSON.parse(raw); }catch(e){ return null; }
+      return (data.filmlist||[]).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:f.type}));
+    };
+    const matchName=list=>{
+      const pre=list.filter(f=>(f.title||'').startsWith(filterTerm));
+      const inc=list.filter(f=>!(f.title||'').startsWith(filterTerm)&&(f.title||'').includes(filterTerm));
+      return pre.concat(inc);
+    };
+    let films=await fetchFilms(searchKey);
+    if(!films) return res.status(502).json({error:'搜索返回异常'});
+    if(isName){
+      films=matchName(films);
+      // 搜索服务的长首字母索引有漏项；例如 MRDB 漏掉“末日地堡”，MR 却能查到三季。
+      // 仅在精确结果为空时用前两字回查，仍按完整中文标题过滤。
+      if(!films.length && searchKey.length>2){
+        searchKey=searchKey.slice(0,2);
+        films=await fetchFilms(searchKey);
+        if(!films) return res.status(502).json({error:'搜索返回异常'});
+        films=matchName(films);
+      }
+    }
     res.json({query:q, initials:searchKey, count:films.length, films:films.slice(0,80)});
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
