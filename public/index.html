@@ -35,6 +35,10 @@
   .logo{width:44px;height:34px;flex:none;object-fit:contain;background:#0a0c10;border-radius:4px}
   .thumb.noimg,.logo.noimg{visibility:hidden}
   .muted{padding:20px;color:var(--dim)}
+  .retry{margin-top:10px;padding:6px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);cursor:pointer}
+  .pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 4px;color:var(--dim);font-size:12px}
+  .pager button{padding:5px 9px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--txt);cursor:pointer}
+  .pager button:disabled{opacity:.4;cursor:default}
   .main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:#000;position:relative}
   .sideToggle{position:absolute;left:0;top:50%;transform:translateY(-50%);z-index:5;width:20px;height:64px;background:rgba(0,0,0,.45);color:#fff;border:none;border-radius:0 9px 9px 0;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;opacity:.28;transition:opacity .2s,background .2s}
   .sideToggle:hover{opacity:.95;background:rgba(0,0,0,.72)}
@@ -216,7 +220,7 @@
 </div>
 <script src="mpegts.js"></script>
 <script>
-let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, filmsCache={};
+let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, curPage=1, curPages=1, filmsCache={};
 let curFilm=null, curEps=[], curEpIdx=0, vodBase=0, vodDur=0, dragging=false, curSpeed=1, isLiveNow=false, curPct=0, switching=false;
 const $=id=>document.getElementById(id);
 // —— 唤醒进度条(按启动步骤+耗时填充,不显示数字) ——
@@ -240,6 +244,7 @@ onMQ(MQ_STACK,applyLayout); onMQ(MQ_DRAWER,e=>{ applyLayout(); if(e.matches&&pla
 applyLayout();
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+filmsCache=LS.get('txtv_native_pages_v1',{});
 
 async function bootOnce(){ startWakeProg();
   let st=await jget('api/status');
@@ -268,7 +273,7 @@ async function afterLogin(){
   const d=await jget('api/channels');
   if(d.error) throw new Error('引擎未就位: '+d.error);
   channels=d.live||[]; window.expiredTime=d.expiredTime||'';
-  stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore();
+  stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore(); loadCats();
 }
 function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; startHeartbeat(); }
 async function loginRequest(body){
@@ -329,20 +334,27 @@ function renderCats(){ const C=$('cats'); C.innerHTML='';
   cats.forEach(c=>{ const b=document.createElement('button'); b.textContent=c.type; b.dataset.key=c.link; b.onclick=()=>selectCat(c.link); C.appendChild(b); });
   highlightCat(); }
 function highlightCat(){ document.querySelectorAll('#cats button').forEach(x=>x.classList.toggle('on', x.dataset.key===curCat)); }
+function showVodLoadError(message,retry){ const L=$('listVod'); L.innerHTML=''; const d=document.createElement('div'); d.className='muted'; d.textContent=message;
+  const b=document.createElement('button'); b.className='retry'; b.textContent='重试'; b.onclick=retry; d.append(document.createElement('br'),b); L.appendChild(d); }
+function catCacheKey(path,page){ return path+'@'+page; }
+function showCatPage(path,page,my){ curPage=page; const key=catCacheKey(path,page), cached=filmsCache[key]; $('listVod').scrollTop=0;
+  if(cached){ films=cached.films; curPages=cached.pages; renderFilms(null,{page,pages:curPages}); }
+  loadFilms(path,page,my,!cached); }
 function selectCat(key){ activeSearch?.close(); activeSearch=null; const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
   if(key==='recent'){ showRecent(); return; }
-  const hasCache=!!filmsCache[key];
-  if(hasCache){ films=filmsCache[key]; renderFilms(); }   // 先秒显当前缓存
-  loadFilms(key, my, !hasCache); }                        // 再后台拉最新;无缓存时才显示"加载中"
+  showCatPage(key,1,my); }
+function selectCatPage(page){ if(page<1||page>curPages||curCat==='search'||curCat==='recent')return;
+  showCatPage(curCat,page,++reqSeq); }
 function ensureDefaultSelection(){ if(curCat==null && cats.length && !$('vq').value.trim()){ selectCat(cats[0].link); } }   // 只在还没有任何选择时才选默认,不覆盖用户选择
 async function loadCats(){
   // 1) 有本地缓存先瞬间渲染 chips(不等网络),用户马上能点
-  if(!cats.length){ const cached=LS.get('txtv_cats',null); if(cached&&cached.length){ cats=cached; renderCats(); ensureDefaultSelection(); } }
+  if(!cats.length){ const cached=LS.get('txtv_native_cats_v1',null); if(cached&&cached.length){ cats=cached; renderCats(); ensureDefaultSelection(); } }
   // 2) 后台拉最新;变了才重建 chips(重建也保留当前高亮),更新缓存。绝不改变用户已做的选择。
-  let d; try{ d=await jget('api/vod/categories'); }catch(e){ return; }
+  let d; try{ d=await jget('api/vod/categories'); }catch(e){ if(!cats.length)showVodLoadError('分类加载失败：'+(e.message||e),loadCats); return; }
   const fresh=d.categories||[];
-  if(!cats.length || JSON.stringify(fresh)!==JSON.stringify(cats)){ cats=fresh; try{LS.set('txtv_cats',cats);}catch(e){} renderCats(); }
-  else { try{LS.set('txtv_cats',cats);}catch(e){} }
+  if(curCat && curCat!=='search' && curCat!=='recent' && !fresh.some(c=>c.link===curCat)) curCat=null;
+  if(!cats.length || JSON.stringify(fresh)!==JSON.stringify(cats)){ cats=fresh; LS.set('txtv_native_cats_v1',cats); renderCats(); }
+  else LS.set('txtv_native_cats_v1',cats);
   ensureDefaultSelection(); }
 function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML='';
   if(!r.length){ L.innerHTML='<div class="muted">还没有播放记录</div>'; return; }
@@ -352,14 +364,16 @@ function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML=''
     else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
       el.innerHTML=`${pic}<span class="nm">${it.title||it.film.title}</span><span class="rk">${it.epname||''}</span>`; el.onclick=()=>openDetail(it.film); }
     L.appendChild(el); }); }
-async function loadFilms(path, my, showLoading){ if(my==null) my=++reqSeq;
+async function loadFilms(path,page,my,showLoading){ if(my==null) my=++reqSeq;
   if(showLoading) $('listVod').innerHTML='<div class="muted">加载中…</div>';
-  let d; try{ d=await jget('api/vod/list?path='+encodeURIComponent(path)); }
-  catch(e){ if(showLoading && my===reqSeq && curCat===path)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
-  const listData=d.films||[];
-  const changed=JSON.stringify(listData)!==JSON.stringify(filmsCache[path]);
-  filmsCache[path]=listData;   // 总是写缓存(即使已切走)——反复快速切换也能缓存成功,修复"永远加载不出来"
-  if(my===reqSeq && curCat===path && (showLoading || changed)){ films=listData; renderFilms(); }   // 还在本分类:首次加载 或 内容变了 才渲染
+  let d; try{ d=await jget('api/vod/list?path='+encodeURIComponent(path)+'&page='+page); }
+  catch(e){ if(showLoading && my===reqSeq && curCat===path && curPage===page)showVodLoadError('加载失败：'+(e.message||e),()=>showCatPage(path,page,++reqSeq)); return; }
+  const key=catCacheKey(path,page), entry={films:d.films||[],pages:d.pages||1};
+  const changed=JSON.stringify(entry)!==JSON.stringify(filmsCache[key]);
+  filmsCache[key]=entry;
+  while(Object.keys(filmsCache).length>24) delete filmsCache[Object.keys(filmsCache)[0]];
+  LS.set('txtv_native_pages_v1',filmsCache);
+  if(my===reqSeq && curCat===path && curPage===page && (showLoading || changed)){ films=entry.films; curPages=entry.pages; renderFilms(null,{page,pages:curPages}); }
 }
 let vqTimer=null, activeSearch=null, vqComposing=false;
 function queueSearch(q,immediate=false){
@@ -393,13 +407,18 @@ function searchVod(q){ const my=++reqSeq; let lastResult=null;
     else renderFilms('搜到 '+lastResult.count+' 部（'+lastResult.source+' · 另一套目录连接中断）');
   } };
 }
-function renderFilms(head){ const L=$('listVod'); L.innerHTML='';
+function renderFilms(head,paging){ const L=$('listVod'); L.innerHTML='';
   if(head){ const h=document.createElement('div'); h.className='muted'; h.style.cssText='padding:8px 11px;font-size:12px'; h.textContent=head; L.appendChild(h); }
+  if(!films.length){ const d=document.createElement('div'); d.className='muted'; d.textContent='此页暂无节目'; L.appendChild(d); }
   films.forEach(f=>{ const el=document.createElement('div'); el.className='row';
     const pic=f.pic?`<img class="thumb" loading="lazy" src="poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
     el.innerHTML=pic; const name=document.createElement('span'); name.className='nm'; name.textContent=f.title;
     const remark=document.createElement('span'); remark.className='rk'; remark.textContent=f.sources?.length>1?f.sources.length+' 个片源':(f.remark||'');
-    el.append(name,remark); el.onclick=()=>openDetail(f); L.appendChild(el); }); }
+    el.append(name,remark); el.onclick=()=>openDetail(f); L.appendChild(el); });
+  if(paging&&paging.pages>1){ const p=document.createElement('div'); p.className='pager';
+    const prev=document.createElement('button'); prev.textContent='上一页'; prev.disabled=paging.page<=1; prev.onclick=()=>selectCatPage(paging.page-1);
+    const next=document.createElement('button'); next.textContent='下一页'; next.disabled=paging.page>=paging.pages; next.onclick=()=>selectCatPage(paging.page+1);
+    const label=document.createElement('span'); label.textContent=`${paging.page} / ${paging.pages} 页`; p.append(prev,label,next); L.appendChild(p); } }
 let lastDetail=null;
 async function openDetail(f,sourceIndex=0){ const my=++reqSeq, selected=f.sources?.[sourceIndex]||f;
   $('detail').classList.add('show'); $('dTitle').textContent=f.title;

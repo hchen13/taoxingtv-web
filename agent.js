@@ -1,5 +1,5 @@
 📦
-490016 /agent-src.js
+490655 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13775,6 +13775,24 @@ var require_agent_src = __commonJS({
               }
             };
             resolve({ VODROOT_URL: g("VODROOT_URL"), VODBASE_URL: g("VODBASE_URL"), VODM3U8_URL: g("VODM3U8_URL"), VODSEARCH_URL: g("VODSEARCH_URL"), VODPDATA_URL: g("VODPDATA_URL"), account: g("g_account"), mac: g("g_mac") });
+          } catch (e) {
+            reject("" + (e.stack || e));
+          }
+        }));
+      },
+      vodUrlsOld: function() {
+        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+          try {
+            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+            const g = (f) => {
+              try {
+                const v = CD[f].value;
+                return v == null ? null : "" + v;
+              } catch (e) {
+                return null;
+              }
+            };
+            resolve({ VODROOT_URL: g("VODROOT_URL"), VODBASE_URL: g("VODBASE_URL") });
           } catch (e) {
             reject("" + (e.stack || e));
           }

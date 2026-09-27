@@ -104,6 +104,14 @@ rpc.exports = {
       } catch(e){ reject(''+(e.stack||e)); }
     }));
   },
+  vodUrlsOld: function () {
+    return new Promise((resolve, reject) => Java.perform(function () {
+      try { const CD=Java.use('com.vod.coredata.CoreData');
+        const g=f=>{try{const v=CD[f].value;return v==null?null:''+v;}catch(e){return null;}};
+        resolve({ VODROOT_URL:g('VODROOT_URL'), VODBASE_URL:g('VODBASE_URL') });
+      } catch(e){ reject(''+(e.stack||e)); }
+    }));
+  },
   // 用应用账号调 icStaticDecode 取任意 VOD 数据(pathUrl 不含 query)
   vodGet: function (pathUrl) {
     return new Promise((resolve, reject) => Java.perform(function () {

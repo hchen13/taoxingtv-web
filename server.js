@@ -536,27 +536,54 @@ async function vodInit(){ if(vodBase&&vodRootPath)return;
   await vodInitPromise;
 }
 async function vodFetch(path){ await ensureReady(); await vodInit(); const full=/^https?:|^\d/.test(path)?path:(vodBase+path); return script.exports.vodGet(full); }
-function parseVod(raw, root){ const data=xml.parse(raw); if(!data[root]) throw new Error('点播数据暂不可用'); return data; }
+function parseVod(raw, root){ const data=xml.parse(raw); if(!data[root]){
+  const code=String(raw||'').trim(); throw new Error(/^[+-]\d+$/.test(code)?'点播上游返回错误码 '+code:'点播数据暂不可用');
+} return data; }
 function decryptOld(s){ const key=Buffer.from('FB0D2346'.repeat(3)); const dec=crypto.createDecipheriv('des-ede3',key,null); return Buffer.concat([dec.update(Buffer.from(txt(s),'base64')),dec.final()]).toString('utf8'); }
 
+async function nativeVodCategories(){ return cachedVod('native-categories',10*60*1000,async()=>{
+  await ensureReady();
+  const u=await script.exports.vodUrlsOld();
+  if(!u.VODROOT_URL || !u.VODBASE_URL || !u.VODROOT_URL.startsWith(u.VODBASE_URL)) throw new Error('原生点播目录地址尚未就绪');
+  const data=parseVod(await script.exports.vodGetOld(u.VODROOT_URL.slice(u.VODBASE_URL.length)),'category');
+  const categories=arr(data.category.file).map(f=>{
+    let pathname; try{pathname=new URL(txt(f.url)).pathname;}catch(e){return null;}
+    const m=pathname.match(/^\/([A-Za-z0-9_-]+)\/\d+\.xml$/i);
+    return m ? {type:txt(f.name),link:'old:'+m[1],code:m[1]} : null;
+  }).filter(c=>c&&c.type);
+  if(!categories.length) throw new Error('原生点播目录没有可用分类');
+  return {categories};
+}); }
+
 app.get('/api/vod/categories', async (req,res)=>{
-  try { res.json(await cachedVod('categories',10*60*1000,async()=>{
-    await ensureReady(); await vodInit();
-    const data=parseVod(await script.exports.vodGet(vodBase+vodRootPath),'Typelist');
-    const types=arr(data.Typelist.Types).map(t=>({type:txt(t.type),tag:txt(t.tag),link:txt(t.link),sub:txt(t.sub)}))
-      .filter(t=>['电影','电视剧','短剧','综艺','动漫','纪录片','体育'].includes(t.type));
-    return {categories:types};
-  }));
-  } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
+  try { res.json(await nativeVodCategories());
+  } catch(e){ console.warn('[vod categories]',e.message||e); res.status(503).json({error:''+(e.message||e)}); }
 });
 app.get('/api/vod/list', async (req,res)=>{
-  try { const path=req.query.path; if(!path) return res.status(400).json({error:'no path'});
+  try { const path=req.query.path; if(typeof path!=='string'||!path) return res.status(400).json({error:'no path'});
+    if(path.startsWith('old:')){
+      const page=Number(req.query.page||1);
+      if(!Number.isSafeInteger(page)||page<1||page>10000) return res.status(400).json({error:'无效页码'});
+      const cat=(await nativeVodCategories()).categories.find(c=>c.link===path);
+      if(!cat) return res.status(404).json({error:'原生点播分类不存在'});
+      return res.json(await cachedVod('native-list:'+cat.code+':'+page,5*60*1000,async()=>{
+        const data=parseVod(await script.exports.vodGetOld(cat.code+'/'+page+'.xml'),'category');
+        if(txt(data.category['@_name'])!==cat.code) throw new Error('原生点播分类数据不匹配');
+        const pages=Math.max(page,Number(data.category.page)||page);
+        const films=arr(data.category.file).map(f=>{ try{
+          const pic=decryptOld(f.img), playid=decryptOld(f.url);
+          if(!pic.startsWith(cat.code+'/')||!playid.startsWith(cat.code+'/')) return null;
+          return {filmid:playid.split('/')[1],title:txt(f.name),pic:'old:'+pic,remark:'',playid:'old:'+playid,type:'old'};
+        }catch(e){return null;} }).filter(Boolean);
+        return {films,page,pages};
+      }));
+    }
     res.json(await cachedVod('list:'+path,5*60*1000,async()=>{
       const data=parseVod(await vodFetch(path),'Playlist');
       const films=arr(data.Playlist.film).map(f=>({filmid:txt(f.filmid),title:txt(f.title),pic:txt(f.pic),remark:txt(f.remark),playid:txt(f.playid)}));
       return {films};
     }));
-  } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
+  } catch(e){ console.warn('[vod list]',e.message||e); res.status(503).json({error:''+(e.message||e)}); }
 });
 app.get('/api/vod/detail', async (req,res)=>{
   try { const playid=req.query.playid; if(!playid) return res.status(400).json({error:'no playid'});
