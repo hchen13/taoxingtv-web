@@ -1,22 +1,30 @@
 import Java from 'frida-java-bridge';
 
-// 持久单例回调:attach 后建一次、全局引用永不 GC,所有 play/vodPlay 复用。
-// (Frida 坑:每次 $new 的注册类实例若被 JS 侧 GC,原生 P2P 线程之后回调它 -> native SIGSEGV 崩溃。
-//  这正是本项目 App "每隔几分钟崩一次(电视上不崩)"的根因。)
-// 回调实例:优先用预编译的**真实 DEX 类** com.txtv.NativeCB(/data/local/tmp/txtvcb.dex)。
-// 为什么:Java.registerClass 造的类会(a)污染 ART DexCache -> FATAL IncompatibleClassChangeError,
-// (b)让原生P2P线程回调时走 Frida 匿名内存 -> SIGSEGV(CallVoidMethodV)。两种崩溃实测都由它引起
-// (电视上无 Frida 故从不崩)。真实 DEX 类是普通 ART 类,回调走标准 JNI,且它只写静态字段、
-// 不从原生线程调 send() 回 JS,彻底移除崩溃路径。tell 码由 pollTell() 轮询读取。
-// 回调实现类的 DEX(预编译的真实 Java 类 com.txtv.NativeCB,内嵌base64,约900字节)。
-// 为什么不用 Java.registerClass:它造的类方法体是跳回 Frida JS 运行时的原生跳板,
-// 原生P2P线程回调它时崩溃(SIGSEGV: art::JNI::CallVoidMethodV -> <anonymous> Frida内存),
-// 且会污染 ART DexCache 引发 FATAL IncompatibleClassChangeError。实测这两类崩溃就是
-// "App每隔几分钟崩"的根因(电视上无Frida故从不崩,用户已验证同内容在电视可完整播放)。
-// NativeCB 是普通 ART 类、纯 Java 字节码,回调走标准 JNI,零 Frida 参与;它只写静态字段,
-// 不从原生线程回调JS(那也是崩溃路径),tell 码由 pollTell() 轮询读取。
+// 直播仍使用内存 DEX 回调；点播必须使用 App 自己的 VodPlayActivity 回调。
+// Android 13 模拟器上，点播 P2P 到 endBlockID 时调用内存 DEX 回调会在
+// art::JNI::CallVoidMethodV 崩溃（两集 Silo 片尾均复现）。App 原生的
+// VodPlayActivity.tellMessage(2) 只设置 gotPlayOver，可安全处理片尾通知。
+// 两种回调都保留全局强引用，避免原生 P2P 线程稍后访问已回收的对象。
 const CB_DEX_B64 = 'ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA';
 let CB_INST = null, CB_NATIVE = null, CB_LOADER = null, CB_MODE = 'none', CB_FAIL = '';
+let VOD_CB = null, vodCbPending = null;
+function ensureVodCB() {
+  if (VOD_CB) return Promise.resolve(VOD_CB);
+  if (vodCbPending) return vodCbPending;
+  vodCbPending = new Promise((resolve, reject) => Java.perform(() => {
+    Java.scheduleOnMainThread(() => {
+      try {
+        const Activity = Java.use('com.newvod.activity.VodPlayActivity');
+        VOD_CB = Java.retain(Java.cast(Activity.$new(), Java.use('dnet.ITellMessage')));
+        resolve(VOD_CB);
+      } catch (e) {
+        vodCbPending = null;
+        reject(new Error('App 原生点播回调创建失败: ' + (e.stack || e)));
+      }
+    });
+  }));
+  return vodCbPending;
+}
 function ensureCB() {
   if (CB_INST) return CB_INST;
   try {
@@ -150,15 +158,15 @@ rpc.exports = {
     }));
   },
   vodPlay: function (channelId, ip, port, percent, mode) {
-    return new Promise((resolve, reject) => Java.perform(function () {
+    return ensureVodCB().then(cb => new Promise((resolve, reject) => Java.perform(function () {
       let step='start';
       try {
         step='stopPrev'; const VC=Java.use('dnet.VideoClient'); try{VC.playbackStop();}catch(e){} try{VC.vodStop();}catch(e){}
-        step='cb'; const cb=ensureCB(); const p=parseInt(port,10);   // 复用持久单例,不再每次 $new
+        const p=parseInt(port,10);
         step='vodStart'; const port_=VC.vodStart(channelId, ip, p, ip, p, ip, p, (percent|0), cb, mode===0?0:1);
-        resolve({ port: port_, callback: CB_MODE });
+        resolve({ port: port_, callback: 'activity' });
       } catch(e){ reject('at['+step+']: '+(e&&(e.stack||e.message||e)||'unknown')); }
-    }));
+    })));
   },
   play: function (chid, startTime) {
     return new Promise((resolve, reject) => Java.perform(function () {

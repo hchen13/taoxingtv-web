@@ -1,5 +1,5 @@
 📦
-490655 /agent-src.js
+491504 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13664,6 +13664,25 @@ var require_agent_src = __commonJS({
     var CB_LOADER = null;
     var CB_MODE = "none";
     var CB_FAIL = "";
+    var VOD_CB = null;
+    var vodCbPending = null;
+    function ensureVodCB() {
+      if (VOD_CB) return Promise.resolve(VOD_CB);
+      if (vodCbPending) return vodCbPending;
+      vodCbPending = new Promise((resolve, reject) => frida_java_bridge_default.perform(() => {
+        frida_java_bridge_default.scheduleOnMainThread(() => {
+          try {
+            const Activity = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
+            VOD_CB = frida_java_bridge_default.retain(frida_java_bridge_default.cast(Activity.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
+            resolve(VOD_CB);
+          } catch (e) {
+            vodCbPending = null;
+            reject(new Error("App \u539F\u751F\u70B9\u64AD\u56DE\u8C03\u521B\u5EFA\u5931\u8D25: " + (e.stack || e)));
+          }
+        });
+      }));
+      return vodCbPending;
+    }
     function ensureCB() {
       if (CB_INST) return CB_INST;
       try {
@@ -13856,7 +13875,7 @@ var require_agent_src = __commonJS({
         }));
       },
       vodPlay: function(channelId, ip, port, percent, mode) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+        return ensureVodCB().then((cb) => new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
           let step = "start";
           try {
             step = "stopPrev";
@@ -13869,16 +13888,14 @@ var require_agent_src = __commonJS({
               VC.vodStop();
             } catch (e) {
             }
-            step = "cb";
-            const cb = ensureCB();
             const p = parseInt(port, 10);
             step = "vodStart";
             const port_ = VC.vodStart(channelId, ip, p, ip, p, ip, p, percent | 0, cb, mode === 0 ? 0 : 1);
-            resolve({ port: port_, callback: CB_MODE });
+            resolve({ port: port_, callback: "activity" });
           } catch (e) {
             reject("at[" + step + "]: " + (e && (e.stack || e.message || e) || "unknown"));
           }
-        }));
+        })));
       },
       play: function(chid, startTime) {
         return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
