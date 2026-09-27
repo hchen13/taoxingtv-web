@@ -15,7 +15,7 @@
 - **网页登录(全后台)**:首次在网页输账号密码即可,凭据本地持久化、登出后自动登录——**全程不碰模拟器**。
 - **直播 + 点播**:355+ 直播频道(带台标)、电影/剧集/综艺/动漫等点播(带海报),点播支持选集、上/下集、片尾自动下一集。已确认硬件重编码有问题的直播源直接转封装。
 - **播放体验**:进度条三色(已播/已缓冲/未缓冲)、单击暂停、双击全屏、空格/方向键(±15秒 seek、音量)、可收起侧栏让视频占满整页、刷新停留在当前进度、最近播放列表。
-- **按需 + 省资源**:打开网页才唤醒模拟器(冷启动需数十秒),不看时空闲自动释放内存;常驻的只有 Node 守护进程。
+- **按需 + 减少冷启动**:打开网页才唤醒模拟器；关页后一小时内保留热引擎，重新打开通常直接加载。超过一小时才释放模拟器约 1 GB 内存；可用 `IDLE_MS` 调整。
 
 ## 工作原理
 
@@ -26,7 +26,7 @@
 Node 服务 (server.js)  ── Frida 注入 ──▶  Android 模拟器里的淘星TV APK
    │  ffmpeg 转封装 / 必要时硬件转码                  (VideoClient P2P 取流)
    ▼
-localhost:8090 (或 http://txtv)
+localhost:8090 (也支持 /TXTV/ 路径)
 ```
 
 - APK 是 ARM 的,用 **ARM64 Android TV 模拟器**原生跑(Apple Silicon 上不用转译)。
@@ -62,6 +62,17 @@ npm install
 浏览器打开 **http://localhost:8090**。首次会让你输账号密码登录(之后自动登录)。
 
 局域网其他设备用这台机器的 IP:8090 访问即可。可选:用 nginx 反代到 80 端口做成 `http://<主机名>` 免端口访问(**流媒体反代务必 `proxy_buffering off`**)。
+
+本机也可打开 **http://localhost:8090/TXTV/**。若要省略端口，先让 macOS 自带 Apache 转发 `/TXTV/`：
+
+```bash
+sudo cp /etc/apache2/httpd.conf /etc/apache2/httpd.conf.taoxingtv-backup
+sudo sed -i '' -e 's/^#LoadModule proxy_module /LoadModule proxy_module /' -e 's/^#LoadModule proxy_http_module /LoadModule proxy_http_module /' /etc/apache2/httpd.conf
+sudo cp deploy/apache-localhost-txtv.conf /etc/apache2/other/taoxingtv.conf
+sudo apachectl configtest && sudo apachectl start
+```
+
+然后打开 **http://localhost/TXTV/**。这是一次性的管理员操作：80 端口需要系统权限。若 Apache 已占用 80 端口或已有配置，先检查现有站点再合并配置。浏览器在新端口下会使用另一份 `localStorage`，所以原地址的观看进度不会自动搬过来；账号凭据仍由同一台 Node 服务保存。
 
 ## 声明
 

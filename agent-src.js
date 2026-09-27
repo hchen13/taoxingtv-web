@@ -16,9 +16,8 @@ import Java from 'frida-java-bridge';
 // NativeCB 是普通 ART 类、纯 Java 字节码,回调走标准 JNI,零 Frida 参与;它只写静态字段,
 // 不从原生线程回调JS(那也是崩溃路径),tell 码由 pollTell() 轮询读取。
 const CB_DEX_B64 = 'ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA';
-let CB_INST = null, CB_NATIVE = null, CB_LOADER = null, CB_ACT = null, CB_MODE = 'none', CB_FAIL = '';
+let CB_INST = null, CB_NATIVE = null, CB_LOADER = null, CB_MODE = 'none', CB_FAIL = '';
 function ensureCB() {
-  if (CB_ACT) return CB_ACT;          // 优先:App自己的Activity实例(方法齐全)
   if (CB_INST) return CB_INST;
   try {
     const B64 = Java.use('android.util.Base64');
@@ -33,28 +32,8 @@ function ensureCB() {
     // SIGSEGV(CallVoidMethodV, fault addr 0x0 空指针)。这正是"播几分钟后崩"的机制。
     CB_INST = Java.retain(Java.cast(CB_NATIVE.$new(), Java.use('dnet.ITellMessage')));
     CB_MODE = 'dex'; return CB_INST;
-  } catch (e) { CB_FAIL = '' + (e.message || e); }
-  const ITell = Java.use('dnet.ITellMessage');   // 退路:仍用注册类(有崩溃风险)
-  const C = Java.registerClass({ name: 'com.txtv.Callback', implements: [ITell],
-    methods: { tellMessage: function (i) { if (i === 2 || i === 4 || (i >= 100 && i <= 103)) send({ tell: i }); } } });
-  CB_INST = Java.retain(C.$new()); CB_MODE = 'registerClass(dex失败:' + CB_FAIL + ')';
-  return CB_INST;
+  } catch (e) { CB_FAIL = '' + (e.message || e); throw new Error('安全回调加载失败: ' + CB_FAIL); }
 }
-// 在**主线程**预建 App 自己的 VodPlayActivity 实例作为回调(Activity构造需要Looper,只能在主线程)。
-// 动机:原生可能在回调对象上查找 tellMessage 以外的方法(GetMethodID);极简类没有->返回NULL->
-// 带NULL调用即 SIGSEGV(fault addr 0x0)。真机上原生收到的正是 VodPlayActivity,方法齐全。
-// 预建成功则 ensureCB 优先返回它;失败则回落到内存DEX类。
-try {
-  Java.perform(function () {
-    Java.scheduleOnMainThread(function () {
-      try {
-        const A = Java.use('com.newvod.activity.VodPlayActivity');
-        CB_ACT = Java.retain(Java.cast(A.$new(), Java.use('dnet.ITellMessage')));
-        CB_MODE = 'activity';
-      } catch (e) { CB_FAIL += 'act:' + (e.message || e) + ' | '; }
-    });
-  });
-} catch (e) { CB_FAIL += 'actsched:' + (e.message || e) + ' | '; }
 
 function dumpList(listVal, ChannelCls) {
   if (!listVal) return [];
@@ -169,7 +148,7 @@ rpc.exports = {
         step='stopPrev'; const VC=Java.use('dnet.VideoClient'); try{VC.playbackStop();}catch(e){} try{VC.vodStop();}catch(e){}
         step='cb'; const cb=ensureCB(); const p=parseInt(port,10);   // 复用持久单例,不再每次 $new
         step='vodStart'; const port_=VC.vodStart(channelId, ip, p, ip, p, ip, p, (percent|0), cb, mode===0?0:1);
-        resolve({ port: port_ });
+        resolve({ port: port_, callback: CB_MODE });
       } catch(e){ reject('at['+step+']: '+(e&&(e.stack||e.message||e)||'unknown')); }
     }));
   },
@@ -181,7 +160,7 @@ rpc.exports = {
         step='cb'; const cb = ensureCB();   // 复用持久单例,不再每次 $new
         step='playbackStart';
         const port = Java.use('dnet.VideoClient').playbackStart(chid, (startTime|0), 2147483647, cb, 0);
-        resolve({ port: port });
+        resolve({ port: port, callback: CB_MODE });
       } catch(e){ reject('at['+step+']: '+(e&&(e.stack||e.message||e)||'unknown')); }
     }));
   },
@@ -215,10 +194,17 @@ rpc.exports = {
         const url = CD.AUTH_URL.value + '?name=' + CD.g_account.value + '&pass=' + CD.g_password.value +
                     '&androidid=' + CD.g_mac.value + '&lang=' + lang + '&ver=408';
         const ctx = Java.use('android.app.ActivityThread').currentApplication();
-        CD.activatedTime.value = 0;
+        // 原生 HomeActivity 可能正在并发授权；保留它写入的成功标记，避免本次超时把原生结果清掉。
+        const activated = ['com.wys.iptvgo.coredata.CoreData', 'com.newvod.coredata.CoreData',
+          'com.vod.coredata.CoreData', 'com.mtv.coredata.CoreData', 'com.wys.iptvgo.coredata.coretv.CoreData']
+          .map(name => Java.use(name));
         for (let i = 0; i < 2; i++) {
           try { out.auth = VC.icAuth(ctx.getAssets(), url, ip, port, ip, port, ip, port); } catch (e) { out.err = 'auth:' + (e.message || e); break; }
-          if (out.auth === 0) { CD.activatedTime.value = Java.use('java.lang.System').currentTimeMillis(); break; }
+          if (out.auth === 0) {
+            const now=Java.use('java.lang.System').currentTimeMillis();
+            for (const c of activated) c.activatedTime.value = now;
+            break;
+          }
         }
       } catch (e) { out.err = '' + (e.message || e); }
       resolve(out);
@@ -239,7 +225,7 @@ rpc.exports = {
   engineReady: function () {
     return new Promise((resolve) => Java.perform(function () {
       try {
-        const CD = Java.use('com.newvod.coredata.CoreData');
+        const CD = Java.use('com.wys.iptvgo.coredata.CoreData');
         const ChD = Java.use('com.wys.iptvgo.coredata.ChannelData');
         let at = 0; try { at = parseInt(''+CD.activatedTime.value,10)||0; } catch(e){}
         let ch = 0; try { ch = ChD.listChannel.value.size(); } catch(e){}

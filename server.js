@@ -19,7 +19,7 @@ const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const PKG = 'com.wys.iptvgo';
 const CREDS_FILE = __dirname + '/creds.json';  // 本地保存的登录凭据(gitignore,永不进仓库),用于登出/重置后自动登录
 const PORT = process.env.PORT || 8090;
-const IDLE_MS = parseInt(process.env.IDLE_MS || '600000', 10);  // 短暂离开页面不反复冷启动模拟器(一次约几十秒)
+const IDLE_MS = parseInt(process.env.IDLE_MS || '3600000', 10);  // 一小时内重新开页复用热引擎；模拟器空闲约占 1 GB 内存
 const FRIDA_BIN = '/data/local/tmp/frida-server';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -133,22 +133,37 @@ async function bootEmulator(){
         coldLaunch=true;
       }
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
-      if(coldLaunch){ bootStep='等待应用启动…'; await sleep(4000); }  // 短暂等应用进程起来再注入,随后按真实信号放行(不再盲等12s)
+      if(coldLaunch){ bootStep='等待应用启动…'; await sleep(1500); }
       bootStep='注入引擎…'; await attach();
-      if(coldLaunch){
-        let login=null; try{ login=await script.exports.loginState(); }catch(e){}
-        if(login && !login.account){ console.log('[engine] 等待网页登录'); }
-        else { bootStep='等待频道数据就绪…';   // 就绪门:等频道加载完成(icChart挂表成功的信号)。注:activatedTime(icAuth设备授权)在无头环境永远为0——那是HomeActivity的UI流程,我们绕过了界面直接Frida调vodStart,故不能作为门条件(实测等3分钟仍为0)
-          let rdy={};
-          for(let i=0;i<20;i++){ try{ rdy=await script.exports.engineReady(); }catch(e){ rdy={}; } if(rdy && rdy.channels>0) break; await sleep(1500); }
-          console.log('[engine] 频道就绪 ch='+(rdy.channels||0));
-          // 冷启动后必须自己挂表+授权:原生靠首页UI流程跑 icChart/icAuth,我们无头绕过了UI,
-          // 不做这步则 vodStart/playbackStart 一律返回 -1000(没授权),表现为"死端口/取不到流"
-          if(rdy.channels>0){ bootStep='挂表授权…';
-            try{ const a=await script.exports.reAuth(); console.log('[auth] 冷启动授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:'')); }catch(e){ console.log('[auth] 冷启动授权失败',e&&e.message); } }
-        } }
+      const login=await script.exports.loginState();
+      if(!login.account){ console.log('[engine] 等待网页登录'); }
+      else {
+        bootStep='等待频道数据就绪…';
+        let rdy={};
+        for(let i=0;i<20;i++){
+          rdy=await script.exports.engineReady();
+          if(rdy.channels>0) break;
+          await sleep(1500);
+        }
+        if(rdy.channels>0 && !rdy.activated){
+          bootStep='等待应用设备授权…';
+          for(let i=0;i<20 && !rdy.activated;i++){
+            await sleep(1500);
+            rdy=await script.exports.engineReady();
+          }
+        }
+        console.log('[engine] 频道 '+(rdy.channels||0)+' 授权 '+!!rdy.activated);
+        if(rdy.channels>0 && !rdy.activated){
+          bootStep='设备授权中…';
+          const a=await script.exports.reAuth();
+          console.log('[auth] 授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:''));
+          rdy=await script.exports.engineReady();
+          if(!rdy.activated) throw new Error(a.auth===3?'设备授权超时（淘星返回码 3）':'设备授权失败（返回码 '+a.auth+(a.err?'，'+a.err:'')+'）');
+        }
+      }
       state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
-    } catch(e){ state='off'; bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
+    } catch(e){ state='off'; try{ if(session) await session.detach(); }catch(_){} session=null; script=null;
+      bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
   })(); return bootPromise;
 }
@@ -228,9 +243,11 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       // (曾设成30秒想"更有耐心",结果每次失败都要干等30秒、拖慢每一次拖进度,是过度矫正)
       let ff=null, myPort=0, buffered=null, badPortCount=0, deadPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
+        if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         const playStarted=Date.now();
         const r = await playFn();
-        if(isLive) console.log('['+label+'] 原生取流 '+(Date.now()-playStarted)+'ms port='+(r&&r.port));
+        if(isLive) console.log('['+label+'] 原生取流 '+(Date.now()-playStarted)+'ms port='+(r&&r.port)+' callback='+(r&&r.callback));
+        if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         if(aborted) break;
         if(!r || !r.port || r.port<=0){   // -1000 = 没挂表/没授权(hint_master_or_option_error),不是内容问题
           badPortCount++;
@@ -241,22 +258,25 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         }
         const port=r.port;
         adb(['forward','tcp:'+port,'tcp:'+port]);
-        let cand=null, gotData=false;
+        let cand=null, gotData=false, engineLost=false;
         // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
         // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
         for(let sub=1; sub<=3 && !aborted; sub++){
         cand=spawnTranscode(port, isLive, nearEndVod, 0, 0, !!(vod&&vod.transcode), !!(vod&&vod.copyLive));
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
-        const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
+        const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer, watch;
         gotData = await new Promise(resolve=>{
           timer=setTimeout(()=>resolve(false), firstByteMs);
+          watch=setInterval(()=>{ if(state!=='ready'||!script){ engineLost=true; resolve(false); } },250);
           onFirst=()=>resolve(true); onCandExit=()=>resolve(false);
           cand.stdout.on('data', collect);
           cand.stdout.once('data', onFirst);
           cand.once('exit', onCandExit);
         });
         clearTimeout(timer);
+        clearInterval(watch);
         cand.stdout.removeListener('data', onFirst); cand.removeListener('exit', onCandExit);
+        if(engineLost){ try{cand.kill('SIGKILL');}catch(e){} adb(['forward','--remove','tcp:'+port]); throw new Error('取流引擎崩溃，正在重新连接'); }
         if(gotData && !aborted){
           if(isLive) console.log('['+label+'] 首包到达 总计 '+(Date.now()-requestedAt)+'ms,ffmpeg '+(Date.now()-playStarted)+'ms');
           cand.stdout.removeListener('data', collect);
@@ -417,6 +437,12 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
 
 // ---------- HTTP ----------
 const app = express();
+// 同一套页面同时支持 / 和 /TXTV/；反向代理保留前缀转发即可。
+app.use((req,res,next)=>{
+  if(req.url==='/TXTV' || req.url.startsWith('/TXTV?')) return res.redirect(308,'/TXTV/');
+  if(req.url.startsWith('/TXTV/')) req.url=req.url.slice('/TXTV'.length);
+  next();
+});
 app.use(express.json());
 app.get('/', (req,res)=>{ res.set('Cache-Control','no-cache, no-store, must-revalidate'); res.sendFile(__dirname+'/public/index.html'); });
 app.get('/mpegts.js', (req,res)=>res.sendFile(__dirname+'/node_modules/mpegts.js/dist/mpegts.js'));
@@ -487,7 +513,10 @@ app.get('/api/channels', async (req,res)=>{
 
 // 彭博财经原片已是 H.264；VideoToolbox 重编码会产生可重复的 H.264 解码错误与浏览器重连。
 const LIVE_COPY_IDS=new Set(['637']);
-app.get('/stream/:chid', (req,res)=>{ const chid=req.params.chid; serveStream(req,res,()=>script.exports.play(chid,0), 'live:'+chid, true, false, {copyLive:LIVE_COPY_IDS.has(chid)||req.query.copy==='1'}); });
+app.get('/stream/:chid', (req,res)=>{ const chid=req.params.chid; serveStream(req,res,()=>{
+  if(!script) throw new Error('取流引擎未就绪');
+  return script.exports.play(chid,0);
+}, 'live:'+chid, true, false, {copyLive:LIVE_COPY_IDS.has(chid)||req.query.copy==='1'}); });
 
 app.post('/api/stop', async (req,res)=>{ lastActivity=Date.now(); cleanupCurrent(); res.json({ok:true}); });
 app.post('/api/leave', async (req,res)=>{ cleanupCurrent(); res.json({ok:true}); });

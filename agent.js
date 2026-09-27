@@ -1,5 +1,5 @@
 📦
-490690 /agent-src.js
+490016 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13662,11 +13662,9 @@ var require_agent_src = __commonJS({
     var CB_INST = null;
     var CB_NATIVE = null;
     var CB_LOADER = null;
-    var CB_ACT = null;
     var CB_MODE = "none";
     var CB_FAIL = "";
     function ensureCB() {
-      if (CB_ACT) return CB_ACT;
       if (CB_INST) return CB_INST;
       try {
         const B64 = frida_java_bridge_default.use("android.util.Base64");
@@ -13681,33 +13679,8 @@ var require_agent_src = __commonJS({
         return CB_INST;
       } catch (e) {
         CB_FAIL = "" + (e.message || e);
+        throw new Error("\u5B89\u5168\u56DE\u8C03\u52A0\u8F7D\u5931\u8D25: " + CB_FAIL);
       }
-      const ITell = frida_java_bridge_default.use("dnet.ITellMessage");
-      const C = frida_java_bridge_default.registerClass({
-        name: "com.txtv.Callback",
-        implements: [ITell],
-        methods: { tellMessage: function(i) {
-          if (i === 2 || i === 4 || i >= 100 && i <= 103) send({ tell: i });
-        } }
-      });
-      CB_INST = frida_java_bridge_default.retain(C.$new());
-      CB_MODE = "registerClass(dex\u5931\u8D25:" + CB_FAIL + ")";
-      return CB_INST;
-    }
-    try {
-      frida_java_bridge_default.perform(function() {
-        frida_java_bridge_default.scheduleOnMainThread(function() {
-          try {
-            const A = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
-            CB_ACT = frida_java_bridge_default.retain(frida_java_bridge_default.cast(A.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
-            CB_MODE = "activity";
-          } catch (e) {
-            CB_FAIL += "act:" + (e.message || e) + " | ";
-          }
-        });
-      });
-    } catch (e) {
-      CB_FAIL += "actsched:" + (e.message || e) + " | ";
     }
     function dumpList(listVal, ChannelCls) {
       if (!listVal) return [];
@@ -13883,7 +13856,7 @@ var require_agent_src = __commonJS({
             const p = parseInt(port, 10);
             step = "vodStart";
             const port_ = VC.vodStart(channelId, ip, p, ip, p, ip, p, percent | 0, cb, mode === 0 ? 0 : 1);
-            resolve({ port: port_ });
+            resolve({ port: port_, callback: CB_MODE });
           } catch (e) {
             reject("at[" + step + "]: " + (e && (e.stack || e.message || e) || "unknown"));
           }
@@ -13902,7 +13875,7 @@ var require_agent_src = __commonJS({
             const cb = ensureCB();
             step = "playbackStart";
             const port = frida_java_bridge_default.use("dnet.VideoClient").playbackStart(chid, startTime | 0, 2147483647, cb, 0);
-            resolve({ port });
+            resolve({ port, callback: CB_MODE });
           } catch (e) {
             reject("at[" + step + "]: " + (e && (e.stack || e.message || e) || "unknown"));
           }
@@ -13948,7 +13921,13 @@ var require_agent_src = __commonJS({
             const lang = "" + CD.LANGS.value[CD.langIndex.value];
             const url = CD.AUTH_URL.value + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=" + lang + "&ver=408";
             const ctx = frida_java_bridge_default.use("android.app.ActivityThread").currentApplication();
-            CD.activatedTime.value = 0;
+            const activated = [
+              "com.wys.iptvgo.coredata.CoreData",
+              "com.newvod.coredata.CoreData",
+              "com.vod.coredata.CoreData",
+              "com.mtv.coredata.CoreData",
+              "com.wys.iptvgo.coredata.coretv.CoreData"
+            ].map((name) => frida_java_bridge_default.use(name));
             for (let i = 0; i < 2; i++) {
               try {
                 out.auth = VC.icAuth(ctx.getAssets(), url, ip, port, ip, port, ip, port);
@@ -13957,7 +13936,8 @@ var require_agent_src = __commonJS({
                 break;
               }
               if (out.auth === 0) {
-                CD.activatedTime.value = frida_java_bridge_default.use("java.lang.System").currentTimeMillis();
+                const now = frida_java_bridge_default.use("java.lang.System").currentTimeMillis();
+                for (const c2 of activated) c2.activatedTime.value = now;
                 break;
               }
             }
@@ -13988,7 +13968,7 @@ var require_agent_src = __commonJS({
       engineReady: function() {
         return new Promise((resolve) => frida_java_bridge_default.perform(function() {
           try {
-            const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
+            const CD = frida_java_bridge_default.use("com.wys.iptvgo.coredata.CoreData");
             const ChD = frida_java_bridge_default.use("com.wys.iptvgo.coredata.ChannelData");
             let at = 0;
             try {

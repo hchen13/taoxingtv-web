@@ -214,7 +214,7 @@
   </section>
   <div class="scrim" id="scrim" onclick="toggleSide()"></div>
 </div>
-<script src="/mpegts.js"></script>
+<script src="mpegts.js"></script>
 <script>
 let channels=[], cats=[], films=[], player=null, curId=null, mode='live', reqSeq=0, curCat=null, filmsCache={};
 let curFilm=null, curEps=[], curEpIdx=0, vodBase=0, vodDur=0, dragging=false, curSpeed=1, isLiveNow=false, curPct=0, switching=false;
@@ -242,15 +242,15 @@ const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floo
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 
 async function bootOnce(){ startWakeProg();
-  let st=await jget('/api/status');
-  if(st.state!=='ready'){ await fetch('/api/wake',{method:'POST'});
+  let st=await jget('api/status');
+  if(st.state!=='ready'){ await fetch('api/wake',{method:'POST'});
     let ok=false;
-    for(let i=0;i<90;i++){ await new Promise(r=>setTimeout(r,1200)); try{st=await jget('/api/status');}catch(e){continue;}
+    for(let i=0;i<90;i++){ await new Promise(r=>setTimeout(r,1200)); try{st=await jget('api/status');}catch(e){continue;}
       wakeStep=st.step||''; $('wstep').textContent=st.step||'正在唤醒引擎…';
       if(st.state==='ready'){ok=true;break;} if(st.step&&st.step.startsWith('启动失败')) throw new Error(st.step); }
     if(!ok) throw new Error('唤醒超时'); }
   stopWakeProg(); setWakeProg(92); $('wstep').textContent='检查登录…';
-  let ls; try{ ls=await jget('/api/loginstate'); }catch(e){ ls={loggedIn:false,hasSavedCreds:false}; }
+  let ls; try{ ls=await jget('api/loginstate'); }catch(e){ ls={loggedIn:false,hasSavedCreds:false}; }
   if(!ls.loggedIn){
     if(ls.hasSavedCreds){ $('wstep').textContent='自动登录中…'; setWakeProg(95); const r=await loginRequest({useSaved:true}); if(!r.ok){ showLogin(r.error||'自动登录失败，请重新登录'); return; } }
     else { showLogin(''); return; }
@@ -260,18 +260,19 @@ async function bootOnce(){ startWakeProg();
 // 刷新后"出节目"是唯一可接受结果:任何瞬时失败(冷启动刚就绪被空闲回收抢到、网络抖动、引擎未就位)都自动重连,不再一失败就停在"请刷新"
 let bootTries=0;
 async function boot(){ try{ await bootOnce(); bootTries=0; }
-  catch(e){ if(bootTries++ < 8){ $('wstep').textContent='引擎未就绪，重连中…（'+bootTries+'）'; setTimeout(boot,2000); }
-    else { stopWakeProg(); $('wstep').textContent='多次重连失败，请刷新重试'; } }
+  catch(e){ const authTimeout=String(e.message||e).includes('设备授权超时'); const limit=authTimeout?2:8;
+    if(bootTries++ < limit){ $('wstep').textContent=(authTimeout?'设备授权超时':'引擎未就绪')+'，重连中…（'+bootTries+'）'; setTimeout(boot,2000); }
+    else { stopWakeProg(); $('wstep').textContent='连接失败：'+(e.message||e); } }
 }
 async function afterLogin(){
-  const d=await jget('/api/channels');
+  const d=await jget('api/channels');
   if(d.error) throw new Error('引擎未就位: '+d.error);
   channels=d.live||[]; window.expiredTime=d.expiredTime||'';
   stopWakeProg(); setWakeProg(100); $('wake').classList.add('hide'); startHeartbeat(); restore();
 }
 function showLogin(err){ $('wakeProg').style.display='none'; $('loginBox').style.display='flex'; $('liErr').textContent=err||''; $('liBtn').disabled=false; $('liBtn').textContent='登录'; startHeartbeat(); }
 async function loginRequest(body){
-  try{ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return await r.json(); }
+  try{ const r=await fetch('api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return await r.json(); }
   catch(e){ return {ok:false,error:'网络错误'}; }
 }
 async function doLogin(){
@@ -314,12 +315,12 @@ function switchTab(m){ mode=m; closeDetail(); saveState();
 // 直播
 function renderChannels(arr){ const L=$('listLive'); L.innerHTML='';
   arr.forEach(c=>{ const d=document.createElement('div'); d.className='row'+(c.channelId===curId?' on':'');
-    const lg=c.link?`<img class="logo" loading="lazy" src="/logo?link=${encodeURIComponent(c.link)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="logo noimg"></span>';
+    const lg=c.link?`<img class="logo" loading="lazy" src="logo?link=${encodeURIComponent(c.link)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="logo noimg"></span>';
     d.innerHTML=`<span class="idx">${c.index||''}</span>${lg}<span class="nm">${c.name||'—'}</span>`;
     d.onclick=()=>playLive(c); d.dataset.id=c.channelId; L.appendChild(d); }); }
 $('q').oninput=e=>{const k=e.target.value.trim().toLowerCase(); renderChannels(k?channels.filter(c=>(c.name||'').toLowerCase().includes(k)):channels);};
 function playLive(c){ curId=c.channelId; curFilm=null; curEps=[]; mark(c.channelId); closeDetail();
-  startPlay(c.name,'/stream/'+encodeURIComponent(c.channelId),true);
+  startPlay(c.name,'stream/'+encodeURIComponent(c.channelId),true);
   pushRecent({key:'live:'+c.channelId,type:'live',channelId:c.channelId,link:c.link,name:c.name,index:c.index}); saveState(); }
 // 点播
 // 分类选择:curCat 永远以用户最新点击为准;异步数据回来若已切走则丢弃,绝不改变用户选择。分类本地缓存,秒开。
@@ -338,7 +339,7 @@ async function loadCats(){
   // 1) 有本地缓存先瞬间渲染 chips(不等网络),用户马上能点
   if(!cats.length){ const cached=LS.get('txtv_cats',null); if(cached&&cached.length){ cats=cached; renderCats(); ensureDefaultSelection(); } }
   // 2) 后台拉最新;变了才重建 chips(重建也保留当前高亮),更新缓存。绝不改变用户已做的选择。
-  let d; try{ d=await jget('/api/vod/categories'); }catch(e){ return; }
+  let d; try{ d=await jget('api/vod/categories'); }catch(e){ return; }
   const fresh=d.categories||[];
   if(!cats.length || JSON.stringify(fresh)!==JSON.stringify(cats)){ cats=fresh; try{LS.set('txtv_cats',cats);}catch(e){} renderCats(); }
   else { try{LS.set('txtv_cats',cats);}catch(e){} }
@@ -346,14 +347,14 @@ async function loadCats(){
 function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML='';
   if(!r.length){ L.innerHTML='<div class="muted">还没有播放记录</div>'; return; }
   r.forEach(it=>{ const el=document.createElement('div'); el.className='row';
-    if(it.type==='live'){ const lg=`<img class="logo" src="/logo?link=${encodeURIComponent(it.link||'')}&v=3" onerror="this.classList.add('noimg')">`;
+    if(it.type==='live'){ const lg=`<img class="logo" src="logo?link=${encodeURIComponent(it.link||'')}&v=3" onerror="this.classList.add('noimg')">`;
       el.innerHTML=`${lg}<span class="nm">${it.name}</span><span class="rk">直播</span>`; el.onclick=()=>{switchTab('live');playLive(it);}; }
-    else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
+    else { const pic=it.film&&it.film.pic?`<img class="thumb" loading="lazy" src="poster?pic=${encodeURIComponent(it.film.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
       el.innerHTML=`${pic}<span class="nm">${it.title||it.film.title}</span><span class="rk">${it.epname||''}</span>`; el.onclick=()=>openDetail(it.film); }
     L.appendChild(el); }); }
 async function loadFilms(path, my, showLoading){ if(my==null) my=++reqSeq;
   if(showLoading) $('listVod').innerHTML='<div class="muted">加载中…</div>';
-  let d; try{ d=await jget('/api/vod/list?path='+encodeURIComponent(path)); }
+  let d; try{ d=await jget('api/vod/list?path='+encodeURIComponent(path)); }
   catch(e){ if(showLoading && my===reqSeq && curCat===path)$('listVod').innerHTML='<div class="muted">加载失败</div>'; return; }
   const listData=d.films||[];
   const changed=JSON.stringify(listData)!==JSON.stringify(filmsCache[path]);
@@ -374,7 +375,7 @@ $('vq').addEventListener('compositionend',e=>{ vqComposing=false; queueSearch(e.
 $('vq').addEventListener('input',e=>{ if(!vqComposing&&!e.isComposing) queueSearch(e.target.value.trim()); });
 $('vq').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!vqComposing){ e.preventDefault(); queueSearch(e.target.value.trim(),true); } });
 function searchVod(q){ const my=++reqSeq; let lastResult=null;
-  const stream=new EventSource('/api/search/stream?q='+encodeURIComponent(q)); activeSearch=stream;
+  const stream=new EventSource('api/search/stream?q='+encodeURIComponent(q)); activeSearch=stream;
   stream.onmessage=e=>{
     if(my!==reqSeq || $('vq').value.trim()!==q){ stream.close(); return; }
     let d; try{d=JSON.parse(e.data);}catch(_){return;}
@@ -395,7 +396,7 @@ function searchVod(q){ const my=++reqSeq; let lastResult=null;
 function renderFilms(head){ const L=$('listVod'); L.innerHTML='';
   if(head){ const h=document.createElement('div'); h.className='muted'; h.style.cssText='padding:8px 11px;font-size:12px'; h.textContent=head; L.appendChild(h); }
   films.forEach(f=>{ const el=document.createElement('div'); el.className='row';
-    const pic=f.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
+    const pic=f.pic?`<img class="thumb" loading="lazy" src="poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
     el.innerHTML=pic; const name=document.createElement('span'); name.className='nm'; name.textContent=f.title;
     const remark=document.createElement('span'); remark.className='rk'; remark.textContent=f.sources?.length>1?f.sources.length+' 个片源':(f.remark||'');
     el.append(name,remark); el.onclick=()=>openDetail(f); L.appendChild(el); }); }
@@ -403,13 +404,13 @@ let lastDetail=null;
 async function openDetail(f,sourceIndex=0){ const my=++reqSeq, selected=f.sources?.[sourceIndex]||f;
   $('detail').classList.add('show'); $('dTitle').textContent=f.title;
   $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dSources').innerHTML=''; $('dPoster').style.backgroundImage='';
-  let d; try{ d=await jget('/api/vod/detail?playid='+encodeURIComponent(selected.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
+  let d; try{ d=await jget('api/vod/detail?playid='+encodeURIComponent(selected.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
   if(my!==reqSeq)return;
   if(d.error){$('dMeta').textContent='加载失败: '+d.error;return;}
   lastDetail={f,selected,sourceIndex,d}; renderDetail(); }
 function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d}=lastDetail; const m=d.film;
   $('detail').classList.add('show'); $('dTitle').textContent=f.title;
-  $('dPoster').style.backgroundImage=selected.pic?`url(/poster?pic=${encodeURIComponent(selected.pic)}&v=3)`:'';
+  $('dPoster').style.backgroundImage=selected.pic?`url(poster?pic=${encodeURIComponent(selected.pic)}&v=3)`:'';
   $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
   $('dDesc').textContent=m.content||'';
   const S=$('dSources'); S.innerHTML='';
@@ -434,7 +435,7 @@ const transcodeFallback=new Set();
 function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
   vodBase=vodDur?Math.floor(percent/100*vodDur):0; curPct=percent;
   const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
-  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}&dur=${vodDur||0}&mode=${ep.sourceMode===0?0:1}&transcode=${transcodeFallback.has(ep.channelId)?1:0}`;   // 带上时长:服务端据此在源断开时无缝续接,并区分'源断了'与'真到片尾'
+  const url=`vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}&dur=${vodDur||0}&mode=${ep.sourceMode===0?0:1}&transcode=${transcodeFallback.has(ep.channelId)?1:0}`;   // 带上时长:服务端据此在源断开时无缝续接,并区分'源断了'与'真到片尾'
   startPlay(title,url,false); updEpBtns();
   pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm});
   { const le=LS.get('txtv_lastep',{}); le[curFilm.playid]=curEpIdx; LS.set('txtv_lastep',le); }  // 记录本片上次看到的集
@@ -475,7 +476,8 @@ function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Ma
   V.oncanplay=()=>{ if(!pendingResumeAt) $('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
     if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
   player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b);
-    if(!isLive && (b===mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED || b===mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED)) fallbackToTranscode(); });
+    if(!isLive && (b===mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED || b===mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED)){ if(fallbackToTranscode()) return; }
+    if(!switching) doRecover(); });
   if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
   else V.play().catch(()=>{});
   flashUI();
@@ -681,13 +683,13 @@ setInterval(async ()=>{
   if(V.paused){   // 暂停:只在"停在缓冲末尾且近片尾+流已断"时判真结束(否则是用户主动暂停,不动)
     const bufEnd = V.buffered.length ? V.buffered.end(V.buffered.length-1) : 0;
     if(nearEnd && curFilm && V.currentTime>=bufEnd-1.0 && !checking){ checking=true;
-      try{ const st=await jget('/api/streamstate'); if(!st.alive) atEnd(); }catch(e){} checking=false; }
+      try{ const st=await jget('api/streamstate'); if(!st.alive) atEnd(); }catch(e){} checking=false; }
     wdStall=0; wdLast=V.currentTime; return;
   }
   const frozen = Math.abs(V.currentTime-wdLast)<0.1; wdLast=V.currentTime;
   if(frozen && V.readyState<3){ wdStall++; } else { wdStall=0; }
   if(wdStall>=4 && !checking){ checking=true;
-    try{ const st=await jget('/api/streamstate');
+    try{ const st=await jget('api/streamstate');
       if(st.ended && curFilm){ wdStall=0; atEnd(); }                 // 原生 tell==2(若触发)
       else if(!st.alive){ wdStall=0; if(nearEnd && curFilm) atEnd(); else doRecover(); }   // 断流:近尾=放完(下一集/结束),中途=重取
       else if(wdStall>=8){ wdStall=0; doRecover(); }   // alive但播放中持续冻结~24s=源真卡住(点播已去掉ffmpeg读超时,改由此处检测)->从当前位置重取
@@ -723,7 +725,7 @@ $('moreMenu').addEventListener('click',e=>e.stopPropagation());
 document.addEventListener('click',()=>$('moreMenu').classList.remove('show'));
 
 let heartbeatTimer=null;
-function startHeartbeat(){ if(heartbeatTimer)return; heartbeatTimer=setInterval(()=>{ if(!document.hidden) fetch('/api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }   // 只要页面开着就保活
+function startHeartbeat(){ if(heartbeatTimer)return; heartbeatTimer=setInterval(()=>{ if(!document.hidden) fetch('api/heartbeat',{method:'POST'}).catch(()=>{}); },20000); }   // 只要页面开着就保活
 // 点播播放时每2秒上报缓冲深度,供服务端反馈节流控制深缓冲上限
 // —— 恢复不回头看 ——
 // 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,
@@ -758,11 +760,11 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
   // 恢复等待期间按"目标位置之后还有多少"上报(否则服务端会以为缓冲已满而停止供数,永远等不到目标)
   const a = pendingResumeAt ? Math.max(0, bufEndAbs-pendingResumeAt)
                             : (V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0);
-  fetch('/api/buf?sid='+activeStreamSid+'&d='+a.toFixed(1)).catch(()=>{});   // 只上报本次播放的缓冲量，旧流不能节流新流
+  fetch('api/buf?sid='+activeStreamSid+'&d='+a.toFixed(1)).catch(()=>{});   // 只上报本次播放的缓冲量，旧流不能节流新流
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
   if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
   if(a < 6 && !V.paused && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;   // 暂停时不做见底判断(不消耗缓冲,也不该重取)
-    try{ const st=await jget('/api/streamstate');
+    try{ const st=await jget('api/streamstate');
       if(!st.alive){ dryStart=0; doRecover(); }                       // 流真的死了(ffmpeg没了)->才重取
       else if(!st.feeding){                                           // 源暂时没出数据:这在P2P很常见,原生就是转圈等
         if(!dryStart) dryStart=Date.now();
@@ -773,7 +775,7 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
     drainChecking=false;
   }
 } }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
-window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('/api/leave'); });
+window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('api/leave'); });
 boot();
 </script>
 </body></html>

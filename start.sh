@@ -7,7 +7,7 @@ export ADB="$ANDROID_HOME/platform-tools/adb"
 export EMULATOR="$ANDROID_HOME/emulator/emulator"
 export AVD=TaoxingTV
 export PORT=${PORT:-8090}
-export IDLE_MS=${IDLE_MS:-90000}
+export IDLE_MS=${IDLE_MS:-3600000}
 cd "$(dirname "$0")"
 
 case "$1" in
@@ -22,5 +22,5 @@ if pgrep -f "node .*taoxingtv/server.js" >/dev/null; then
 else
   nohup node server.js > /tmp/taoxingtv-server.log 2>&1 &
   echo "淘星TV 已启动: http://localhost:$PORT"
-  echo "  打开网页即按需唤醒引擎(约7秒),关掉网页闲置${IDLE_MS}ms后自动释放内存"
+  echo "  打开网页即按需唤醒引擎，关掉网页闲置${IDLE_MS}ms后自动释放内存"
 fi
