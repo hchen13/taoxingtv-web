@@ -452,7 +452,7 @@ function toggleSide(){ const c=!APP.classList.contains('collapsed'); setSide(c);
 try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
 let activeStreamSid='';
 function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
-  url+=(url.includes('?')?'&':'?')+'sid='+activeStreamSid;
+  const streamUrl=new URL(url,location.href); streamUrl.searchParams.set('sid',activeStreamSid); url=streamUrl.href;
   isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   if(inDrawer()) setSide(true);   // 抽屉模式(横屏手机/全屏中):一开始播放就把抽屉收起来
@@ -488,7 +488,8 @@ function flashUI(){ if(!player)return; STAGE.classList.add('ui'); clearTimeout(u
 STAGE.addEventListener('mousemove',flashUI);
 $('pctl').addEventListener('mousemove',e=>e.stopPropagation());
 $('pctl').addEventListener('touchstart',()=>flashUI(),{passive:true});   // 手机:碰到控制栏就续显
-V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui'); });
+let livePauseStartedAt=0;
+V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui'); if(player&&isLiveNow)livePauseStartedAt=Date.now(); });
 // —— 单击暂停 / 双击全屏 ——
 let clickTimer=null;
 STAGE.addEventListener('click',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.ptitle')||e.target.closest('.sideToggle'))return;
@@ -531,7 +532,15 @@ if(isTouch){
     if(dx<-50 && Math.abs(dx)>Math.abs(dy)*1.5){ dS=null; setSide(true); } },{passive:true});
 }
 // —— 控件 ——
-function togglePP(){ if(!player)return; if(V.paused)V.play(); else V.pause(); }
+function togglePP(){ if(!player)return; if(V.paused){
+    const ahead=V.buffered.length?V.buffered.end(V.buffered.length-1)-V.currentTime:0;
+    // 直播暂停太久后 MSE 会积满旧内容；从旧位置续播可能导致音画异常或反复缓冲。
+    // 超出直播延迟窗口就重新取当前流，短暂停仍可从原处继续。
+    if(isLiveNow && ((livePauseStartedAt&&Date.now()-livePauseStartedAt>30000)||ahead>30)){
+      startPlay(window.playTitle||$('ptitle').textContent,window.curUrl,true); $('loadtx').textContent='回到直播…'; livePauseStartedAt=0; return;
+    }
+    V.play();
+  }else V.pause(); }
 $('ppBtn').onclick=togglePP;
 V.addEventListener('play',()=>{$('ppBtn').textContent='⏸';});
 V.addEventListener('pause',()=>{$('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState();});
@@ -698,7 +707,7 @@ setInterval(async ()=>{
   }
 }, 3000);
 V.addEventListener('waiting', ()=>{ if(player&&!recovering){ $('loadtx').textContent='缓冲中…'; $('load').classList.add('show'); } });
-V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); wdStall=0; });   // 不在这清 recoverTimes(会被"每次只播几秒的重取循环"绕过);改由 timeupdate 按真实进展清
+V.addEventListener('playing', ()=>{ $('load').classList.remove('show'); wdStall=0; if(isLiveNow)livePauseStartedAt=0; });   // 不在这清 recoverTimes(会被"每次只播几秒的重取循环"绕过);改由 timeupdate 按真实进展清
 
 // —— 人声增强(Web Audio 动态范围压缩) ——
 let audioCtx=null, srcNode=null, compNode=null, gainNode=null, masterGain=null, audioReady=false;
