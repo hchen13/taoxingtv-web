@@ -328,7 +328,7 @@ function renderCats(){ const C=$('cats'); C.innerHTML='';
   cats.forEach(c=>{ const b=document.createElement('button'); b.textContent=c.type; b.dataset.key=c.link; b.onclick=()=>selectCat(c.link); C.appendChild(b); });
   highlightCat(); }
 function highlightCat(){ document.querySelectorAll('#cats button').forEach(x=>x.classList.toggle('on', x.dataset.key===curCat)); }
-function selectCat(key){ const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
+function selectCat(key){ activeSearch?.close(); activeSearch=null; const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
   if(key==='recent'){ showRecent(); return; }
   const hasCache=!!filmsCache[key];
   if(hasCache){ films=filmsCache[key]; renderFilms(); }   // 先秒显当前缓存
@@ -360,17 +360,38 @@ async function loadFilms(path, my, showLoading){ if(my==null) my=++reqSeq;
   filmsCache[path]=listData;   // 总是写缓存(即使已切走)——反复快速切换也能缓存成功,修复"永远加载不出来"
   if(my===reqSeq && curCat===path && (showLoading || changed)){ films=listData; renderFilms(); }   // 还在本分类:首次加载 或 内容变了 才渲染
 }
-let vqTimer=null;
-$('vq').addEventListener('input',e=>{ const q=e.target.value.trim(); clearTimeout(vqTimer);
+let vqTimer=null, activeSearch=null, vqComposing=false;
+function queueSearch(q,immediate=false){
+  clearTimeout(vqTimer); activeSearch?.close(); activeSearch=null;
+  ++reqSeq; curCat='search'; highlightCat();
   if(!q){ const chips=document.querySelectorAll('#cats button'); if(chips[1])chips[1].click(); return; }
-  vqTimer=setTimeout(()=>searchVod(q),350); });
-async function searchVod(q){ const my=++reqSeq; curCat='search'; highlightCat();   // 搜索态:取消所有分类高亮,curCat 标记为搜索
+  if(!immediate && [...q].length<2){ $('listVod').innerHTML='<div class="muted">继续输入片名，或按回车搜索单字</div>'; return; }
   $('listVod').innerHTML='<div class="muted">搜索中…</div>';
-  let d; try{ d=await jget('/api/search?q='+encodeURIComponent(q)); }catch(e){ if(my===reqSeq)$('listVod').innerHTML='<div class="muted">搜索失败</div>'; return; }
-  if(my!==reqSeq)return;
-  if(d.error){ $('listVod').innerHTML='<div class="muted">搜索失败: '+d.error+'</div>'; return; }
-  films=d.films||[]; if(!films.length){ $('listVod').innerHTML='<div class="muted">没找到"'+q+'"相关节目</div>'; return; }
-  renderFilms('搜到 '+d.count+' 部（'+(d.source||'点播')+' · 首字母 '+d.initials+(d.partial?' · 部分目录暂不可用':'')+'）'); }
+  vqTimer=setTimeout(()=>searchVod(q),immediate?0:550);
+}
+$('vq').addEventListener('compositionstart',()=>{ vqComposing=true; clearTimeout(vqTimer); activeSearch?.close(); activeSearch=null; ++reqSeq; });
+$('vq').addEventListener('compositionend',e=>{ vqComposing=false; queueSearch(e.target.value.trim()); });
+$('vq').addEventListener('input',e=>{ if(!vqComposing&&!e.isComposing) queueSearch(e.target.value.trim()); });
+$('vq').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!vqComposing){ e.preventDefault(); queueSearch(e.target.value.trim(),true); } });
+function searchVod(q){ const my=++reqSeq; let lastResult=null;
+  const stream=new EventSource('/api/search/stream?q='+encodeURIComponent(q)); activeSearch=stream;
+  stream.onmessage=e=>{
+    if(my!==reqSeq || $('vq').value.trim()!==q){ stream.close(); return; }
+    let d; try{d=JSON.parse(e.data);}catch(_){return;}
+    if(d.error){ $('listVod').textContent='搜索失败: '+d.error; stream.close(); activeSearch=null; return; }
+    if(d.complete){ stream.close(); activeSearch=null; }
+    lastResult=d; films=d.films||[];
+    if(!films.length){
+      $('listVod').textContent=d.complete?'没找到"'+q+'"相关节目':'正在查询另一套目录…'; return;
+    }
+    renderFilms('搜到 '+d.count+' 部（'+(d.source||'点播')+' · 首字母 '+d.initials+(d.complete?'':' · 另一套目录查询中')+(d.partial?' · 部分目录暂不可用':'')+'）');
+  };
+  stream.onerror=()=>{ if(my===reqSeq && activeSearch===stream){
+    stream.close(); activeSearch=null;
+    if(!lastResult) $('listVod').textContent='搜索连接中断，请重试';
+    else renderFilms('搜到 '+lastResult.count+' 部（'+lastResult.source+' · 另一套目录连接中断）');
+  } };
+}
 function renderFilms(head){ const L=$('listVod'); L.innerHTML='';
   if(head){ const h=document.createElement('div'); h.className='muted'; h.style.cssText='padding:8px 11px;font-size:12px'; h.textContent=head; L.appendChild(h); }
   films.forEach(f=>{ const el=document.createElement('div'); el.className='row';

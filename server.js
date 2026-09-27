@@ -31,7 +31,7 @@ function readDevFile(dev){
   } catch(e){ return null; }
 }
 // 直播继续硬件转码；点播原片可浏览器解码时只转封装，保留低开销与原生供数速度。
-function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec, transcodeVod=false){
+function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec, transcodeVod=false, copyLive=false){
   // 直播:开 ffmpeg 底层重连,扛 P2P 抖动。
   // 点播:不开重连。点播源的 HTTP 连接只在两种情况下结束:内容真到结尾,或它的 P2P 会话被 vodStop 掉。
   // 连接断了由 serveStream 的 onSegEnd 负地续接(重新 vodStart + -ss 跳过重叠),ffmpeg 自己不重连。
@@ -42,7 +42,7 @@ function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec, transcod
                       : [];
   // 仅在浏览器不支持原片编码时使用已有的低码率硬件转码兜底。
   const venc = isLive
-    ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
+    ? copyLive ? ['-c:v','copy'] : ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
     : transcodeVod ? ['-c:v','h264_videotoolbox','-q:v','50','-maxrate','1500k','-bufsize','3M','-g','60','-pix_fmt','yuv420p']
                    : ['-c:v','copy'];
   const aenc=(!isLive&&!transcodeVod) ? ['-c:a','copy'] : ['-c:a','aac','-b:a','160k','-ac','2'];
@@ -202,6 +202,7 @@ let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请
                 // 旧请求若也去 vodStart 再被抛弃,就是"起流->没出数据->停掉"的高频churn,实测6次就能毒死P2P引擎
 const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
 function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
+  const requestedAt=Date.now();
   const mySeq = ++reqSeq;   // 同步取号(在排队之前),后来者会让先来者作废
   const mySid=typeof req.query.sid==='string' ? req.query.sid.slice(0,64) : '';
   try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
@@ -213,6 +214,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 已被更新请求取代 且 客户端确实已走(seek换流):直接放弃,绝不去动原生引擎。
       // 注意必须带"客户端已走"这个条件:只看序号会导致请求比处理快时人人都被判陈旧->谁都不执行的死锁
       await ensureReady();
+      if(isLive) console.log('['+label+'] 就绪等待 '+(Date.now()-requestedAt)+'ms');
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
       if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 等待期间又被取代且客户端已走,同上
       const hadStream=!!current.port; cleanupCurrent();
@@ -226,7 +228,9 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       // (曾设成30秒想"更有耐心",结果每次失败都要干等30秒、拖慢每一次拖进度,是过度矫正)
       let ff=null, myPort=0, buffered=null, badPortCount=0, deadPortCount=0;
       for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
+        const playStarted=Date.now();
         const r = await playFn();
+        if(isLive) console.log('['+label+'] 原生取流 '+(Date.now()-playStarted)+'ms port='+(r&&r.port));
         if(aborted) break;
         if(!r || !r.port || r.port<=0){   // -1000 = 没挂表/没授权(hint_master_or_option_error),不是内容问题
           badPortCount++;
@@ -241,7 +245,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
         // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
         for(let sub=1; sub<=3 && !aborted; sub++){
-        cand=spawnTranscode(port, isLive, nearEndVod, 0, 0, !!(vod&&vod.transcode));
+        cand=spawnTranscode(port, isLive, nearEndVod, 0, 0, !!(vod&&vod.transcode), !!(vod&&vod.copyLive));
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
         const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
         gotData = await new Promise(resolve=>{
@@ -254,6 +258,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         clearTimeout(timer);
         cand.stdout.removeListener('data', onFirst); cand.removeListener('exit', onCandExit);
         if(gotData && !aborted){
+          if(isLive) console.log('['+label+'] 首包到达 总计 '+(Date.now()-requestedAt)+'ms,ffmpeg '+(Date.now()-playStarted)+'ms');
           cand.stdout.removeListener('data', collect);
           ff=cand; myPort=port; buffered=buf;
           if(sub>1) console.log('['+label+'] 同端口第'+sub+'次重开ffmpeg后出数据');
@@ -480,7 +485,9 @@ app.get('/api/channels', async (req,res)=>{
   catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 
-app.get('/stream/:chid', (req,res)=>{ const chid=req.params.chid; serveStream(req,res,()=>script.exports.play(chid,0), 'live:'+chid, true); });
+// 彭博财经原片已是 H.264；VideoToolbox 重编码会产生可重复的 H.264 解码错误与浏览器重连。
+const LIVE_COPY_IDS=new Set(['637']);
+app.get('/stream/:chid', (req,res)=>{ const chid=req.params.chid; serveStream(req,res,()=>script.exports.play(chid,0), 'live:'+chid, true, false, {copyLive:LIVE_COPY_IDS.has(chid)||req.query.copy==='1'}); });
 
 app.post('/api/stop', async (req,res)=>{ lastActivity=Date.now(); cleanupCurrent(); res.json({ok:true}); });
 app.post('/api/leave', async (req,res)=>{ cleanupCurrent(); res.json({ok:true}); });
@@ -554,7 +561,11 @@ app.get('/api/vod/detail', async (req,res)=>{
 });
 
 function toInitials(han){ return pinyin(han,{pattern:'first',toneType:'none',type:'array'}).join('').toUpperCase().replace(/[^A-Z]/g,''); }
-function searchTitle(s){ return String(s||'').normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu,''); }
+function searchTitle(s){
+  const title=String(s||'').normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu,'');
+  const nums={一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10};
+  return title.replace(/第([一二三四五六七八九十\d]+)季/g,(_,n)=>'第'+(Number(n)||nums[n]||n)+'季');
+}
 // 目录只登记中文名的已知英文原名；Silo 出现在本片海报上，但两套搜索索引都不收它。
 const titleAliases=new Map([['silo','末日地堡']]);
 function seasonInfo(title){
@@ -590,49 +601,86 @@ function mergeSearchResults(lists, q, initials, isName){
   });
   return films.slice(0,80);
 }
+function searchContext(q){
+  const lookup=titleAliases.get(searchTitle(q))||q;
+  const hanMatch=lookup.match(/[一-鿿]+/);
+  const isName=!!hanMatch;
+  const searchKey=isName?toInitials(hanMatch[0]):lookup.toUpperCase().replace(/[^A-Z0-9]/g,'');
+  return {q,lookup,isName,searchKey};
+}
+function searchResult(ctx,found,complete){
+  const {q,lookup,searchKey,isName}=ctx;
+  const films=mergeSearchResults(found.map(r=>r?.status==='fulfilled'?r.value:[]),lookup,searchKey,isName);
+  const names=found.map((r,i)=>r?.status==='fulfilled'?(i?'环球剧场':'电视点播'):null).filter(Boolean);
+  return {query:q,initials:searchKey,count:films.length,films,source:names.join(' + '),
+    partial:found.some(r=>r?.status==='rejected'),complete};
+}
+function oldSearch(searchKey){
+  return cachedVod('searchOld:'+searchKey,5*60*1000,async()=>{
+    const raw=await script.exports.vodSearchOld(searchKey);
+    const data=JSON.parse(raw);
+    return arr(data.items).map(f=>({filmid:txt(f.folder),title:txt(f.name),pic:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.img),remark:txt(f.v_type),playid:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.url),type:'old'}))
+      .filter(f=>/^old:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\.xml$/.test(f.playid));
+  });
+}
+function fetchNewSearch(key){
+  return cachedVod('searchNewRaw:'+key,5*60*1000,async()=>{
+    const raw=await script.exports.vodSearch('vod',key,'all',0);
+    const data=JSON.parse(raw);
+    return arr(data.filmlist).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:'new'}));
+  });
+}
+async function newSearch(ctx){
+  const {searchKey,lookup,isName}=ctx;
+  // 环球剧场的完整拼音索引会漏掉第一季；先查短前缀，再用完整片名过滤。
+  const key=searchKey.length>2?searchKey.slice(0,2):searchKey;
+  let broad; try{ broad=await fetchNewSearch(key); }
+  catch(e){ if(key===searchKey) throw e; return fetchNewSearch(searchKey); }
+  if(key!==searchKey && (broad.length>=80 || !mergeSearchResults([broad],lookup,searchKey,isName).length)){
+    try{ return broad.concat(await fetchNewSearch(searchKey)); }
+    catch(e){ if(!broad.length) throw e; }
+  }
+  return broad;
+}
+async function searchCatalogs(ctx,onProgress){
+  await ensureReady();
+  const found=[null,null], started=Date.now();
+  const calls=[()=>oldSearch(ctx.searchKey),()=>newSearch(ctx)];
+  await Promise.all(calls.map(async(call,i)=>{
+    const t0=Date.now();
+    try{ found[i]={status:'fulfilled',value:await call()}; }
+    catch(e){ found[i]={status:'rejected',reason:e};
+      console.log('[search] '+(i?'环球剧场':'电视点播')+'查询失败:',String(e).slice(0,100)); }
+    console.log('[search] '+(i?'环球剧场':'电视点播')+' '+ctx.searchKey+' '+(Date.now()-t0)+'ms');
+    if(onProgress && !found.every(Boolean) && found.some(r=>r?.status==='fulfilled')) onProgress(searchResult(ctx,found,false));
+  }));
+  if(found.every(r=>r.status==='rejected')) throw new Error('两套点播搜索暂不可用');
+  console.log('[search] 合并 '+ctx.searchKey+' '+(Date.now()-started)+'ms');
+  return searchResult(ctx,found,true);
+}
 app.get('/api/search', async (req,res)=>{
-  try { const q=(req.query.q||'').trim(); if(!q) return res.json({films:[]});
-    const lookup=titleAliases.get(searchTitle(q))||q;
-    const hanMatch=lookup.match(/[一-鿿]+/); let searchKey,isName;
-    if(hanMatch){ searchKey=toInitials(hanMatch[0]); isName=true; }
-    else { searchKey=lookup.toUpperCase().replace(/[^A-Z0-9]/g,''); isName=false; }
-    if(!searchKey) return res.json({films:[], initials:''});
-    // 同一首字母的不同输入复用两套原始索引结果：用户从 MRDB 改搜中文全名时无需再访问远端。
-    res.json(await cachedVod('search:'+q,10*1000,async()=>{
-    await ensureReady();
-    const oldSearch=()=>cachedVod('searchOld:'+searchKey,5*60*1000,async()=>{
-      const raw=await script.exports.vodSearchOld(searchKey);
-      const data=JSON.parse(raw);
-      return arr(data.items).map(f=>({filmid:txt(f.folder),title:txt(f.name),pic:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.img),remark:txt(f.v_type),playid:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.url),type:'old'}))
-        .filter(f=>/^old:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\.xml$/.test(f.playid));
-    });
-    const fetchFilms=key=>cachedVod('searchNewRaw:'+key,5*60*1000,async()=>{
-      const raw=await script.exports.vodSearch('vod',key,'all',0);
-      const data=JSON.parse(raw);
-      return arr(data.filmlist).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:'new'}));
-    });
-    const newSearch=async()=>{
-      // 环球剧场的完整拼音索引会漏掉第一季；先查短前缀，再用完整片名过滤。
-      // 前缀结果为空或接近列表上限时再补查完整拼音，通常省去一次远端请求。
-      const key=searchKey.length>2?searchKey.slice(0,2):searchKey;
-      let broad; try{ broad=await fetchFilms(key); }
-      catch(e){ if(key===searchKey) throw e; return fetchFilms(searchKey); }
-      if(key!==searchKey && (broad.length>=80 || !mergeSearchResults([broad],lookup,searchKey,isName).length)){
-        try{ return broad.concat(await fetchFilms(searchKey)); }
-        catch(e){ if(!broad.length) throw e; }
-      }
-      return broad;
-    };
-    const found=await Promise.allSettled([oldSearch(),newSearch()]);
-    if(found.every(r=>r.status==='rejected')) throw new Error('两套点播搜索暂不可用');
-    for(let i=0;i<found.length;i++) if(found[i].status==='rejected')
-      console.log('[search] '+(i?'环球剧场':'电视点播')+'查询失败:',String(found[i].reason).slice(0,100));
-    const films=mergeSearchResults(found.map(r=>r.status==='fulfilled'?r.value:[]),lookup,searchKey,isName);
-    return {query:q,initials:searchKey,count:films.length,films,
-      source:found.every(r=>r.status==='fulfilled')?'电视点播 + 环球剧场':(found[0].status==='fulfilled'?'电视点播':'环球剧场'),
-      partial:found.some(r=>r.status==='rejected')};
-    }));
-  } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
+  try{ const q=String(req.query.q||'').trim(); if(!q) return res.json({films:[]});
+    const ctx=searchContext(q); if(!ctx.searchKey) return res.json({films:[],initials:''});
+    // 同一首字母的不同输入复用两套原始索引结果。
+    res.json(await cachedVod('search:'+q,10*1000,()=>searchCatalogs(ctx)));
+  }catch(e){ res.status(503).json({error:''+(e.message||e)}); }
+});
+app.get('/api/search/stream', async(req,res)=>{
+  const q=String(req.query.q||'').trim();
+  if(!q) return res.status(400).json({error:'no query'});
+  const ctx=searchContext(q);
+  if(!ctx.searchKey) return res.status(400).json({error:'invalid query'});
+  res.setHeader('Content-Type','text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control','no-cache');
+  res.setHeader('X-Accel-Buffering','no');
+  res.flushHeaders();
+  let closed=false; res.on('close',()=>{closed=true;});
+  const send=d=>{if(!closed) res.write('data: '+JSON.stringify(d)+'\n\n');};
+  try{
+    const result=await searchCatalogs(ctx,send);
+    send(result);
+  }catch(e){ send({error:String(e.message||e),complete:true}); }
+  if(!closed) res.end();
 });
 
 app.get('/vod-stream', (req,res)=>{
