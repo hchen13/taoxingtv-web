@@ -27,6 +27,10 @@
   .row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .row .rk{color:var(--dim);font-size:12px;flex:none;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .row.on .rk,.row.on .idx{color:#cfe0ff}
+  .sourcebar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:4px 0 14px}
+  .sourcebar:empty{display:none}
+  .sourcebar button{padding:5px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--dim);cursor:pointer}
+  .sourcebar button.on{background:var(--acc2);border-color:var(--acc);color:#fff}
   .thumb{width:38px;height:52px;flex:none;border-radius:4px;object-fit:cover;background:var(--panel2)}
   .logo{width:44px;height:34px;flex:none;object-fit:contain;background:#0a0c10;border-radius:4px}
   .thumb.noimg,.logo.noimg{visibility:hidden}
@@ -169,7 +173,7 @@
   <aside class="side">
     <div class="tabs"><button id="tabLive" class="on" onclick="switchTab('live')">直播</button><button id="tabVod" onclick="switchTab('vod')">点播</button></div>
     <div id="liveBox"><div class="search"><input id="q" placeholder="搜索频道…"></div><div class="list" id="listLive"></div></div>
-    <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名(中文)… 如 黄石"></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
+    <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名或拼音首字母…"></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
   </aside>
   <section class="main">
     <div class="stage" id="stage">
@@ -203,6 +207,7 @@
       <div class="detail" id="detail"><button class="close" onclick="closeDetail()">✕</button>
         <div class="head"><div class="poster" id="dPoster"></div><div style="flex:1">
           <h2 id="dTitle"></h2><div class="meta" id="dMeta" onclick="this.classList.toggle('open')"></div><div class="desc" id="dDesc" onclick="this.classList.toggle('open')"></div></div></div>
+        <div class="sourcebar" id="dSources"></div>
         <div class="epstitle">选集播放</div><div class="eps" id="dEps"></div>
       </div>
     </div>
@@ -365,40 +370,50 @@ async function searchVod(q){ const my=++reqSeq; curCat='search'; highlightCat();
   if(my!==reqSeq)return;
   if(d.error){ $('listVod').innerHTML='<div class="muted">搜索失败: '+d.error+'</div>'; return; }
   films=d.films||[]; if(!films.length){ $('listVod').innerHTML='<div class="muted">没找到"'+q+'"相关节目</div>'; return; }
-  renderFilms('搜到 '+d.count+' 部（首字母 '+d.initials+'）'); }
+  renderFilms('搜到 '+d.count+' 部（'+(d.source||'点播')+' · 首字母 '+d.initials+(d.partial?' · 部分目录暂不可用':'')+'）'); }
 function renderFilms(head){ const L=$('listVod'); L.innerHTML='';
   if(head){ const h=document.createElement('div'); h.className='muted'; h.style.cssText='padding:8px 11px;font-size:12px'; h.textContent=head; L.appendChild(h); }
   films.forEach(f=>{ const el=document.createElement('div'); el.className='row';
     const pic=f.pic?`<img class="thumb" loading="lazy" src="/poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
-    el.innerHTML=`${pic}<span class="nm">${f.title}</span><span class="rk">${f.remark||''}</span>`; el.onclick=()=>openDetail(f); L.appendChild(el); }); }
+    el.innerHTML=pic; const name=document.createElement('span'); name.className='nm'; name.textContent=f.title;
+    const remark=document.createElement('span'); remark.className='rk'; remark.textContent=f.sources?.length>1?f.sources.length+' 个片源':(f.remark||'');
+    el.append(name,remark); el.onclick=()=>openDetail(f); L.appendChild(el); }); }
 let lastDetail=null;
-async function openDetail(f){ const my=++reqSeq; $('detail').classList.add('show'); $('dTitle').textContent=f.title;
-  $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dPoster').style.backgroundImage='';
-  let d; try{ d=await jget('/api/vod/detail?playid='+encodeURIComponent(f.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
+async function openDetail(f,sourceIndex=0){ const my=++reqSeq, selected=f.sources?.[sourceIndex]||f;
+  $('detail').classList.add('show'); $('dTitle').textContent=f.title;
+  $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dSources').innerHTML=''; $('dPoster').style.backgroundImage='';
+  let d; try{ d=await jget('/api/vod/detail?playid='+encodeURIComponent(selected.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
   if(my!==reqSeq)return;
   if(d.error){$('dMeta').textContent='加载失败: '+d.error;return;}
-  lastDetail={f,d}; renderDetail(); }
-function renderDetail(){ if(!lastDetail)return; const {f,d}=lastDetail; const m=d.film;
+  lastDetail={f,selected,sourceIndex,d}; renderDetail(); }
+function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d}=lastDetail; const m=d.film;
   $('detail').classList.add('show'); $('dTitle').textContent=f.title;
-  $('dPoster').style.backgroundImage=f.pic?`url(/poster?pic=${encodeURIComponent(f.pic)}&v=3)`:'';
+  $('dPoster').style.backgroundImage=selected.pic?`url(/poster?pic=${encodeURIComponent(selected.pic)}&v=3)`:'';
   $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
-  $('dDesc').textContent=m.content||''; const E=$('dEps'); E.innerHTML='';
+  $('dDesc').textContent=m.content||'';
+  const S=$('dSources'); S.innerHTML='';
+  if(f.sources?.length>1) f.sources.forEach((source,i)=>{
+    const b=document.createElement('button'); b.textContent=source.type==='old'?'电视点播':'环球剧场';
+    b.classList.toggle('on',i===sourceIndex); b.onclick=()=>openDetail(f,i); S.appendChild(b);
+  });
+  const E=$('dEps'); E.innerHTML='';
   const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
   const narrow=matchMedia('(max-width:900px),(max-height:520px)').matches;   // 手机:字号小,格子也相应小
   E.style.gridTemplateColumns='repeat(auto-fill,minmax('+(narrow?Math.min(200,Math.max(64,maxLen*16+22)):Math.min(320,Math.max(76,maxLen*24+40)))+'px,1fr))';
-  const lastEp=(LS.get('txtv_lastep',{}))[f.playid];   // 本片上次看到的集(undefined=没看过)
+  const lastEp=(LS.get('txtv_lastep',{}))[selected.playid];   // 本片上次看到的集(undefined=没看过)
   eps.forEach((ep,i)=>{ const cell=document.createElement('div'); cell.className='epcell';
     const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
     if(lastEp===i){ cell.classList.add('last'); }
-    else if(curFilm&&curFilm.playid===f.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
-    b.onclick=()=>{ closeDetail(); curFilm=f; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(f.playid,i)); }; cell.appendChild(b); E.appendChild(cell); }); }
+    else if(curFilm&&curFilm.playid===selected.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
+    b.onclick=()=>{ closeDetail(); curFilm=selected; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(selected.playid,i)); }; cell.appendChild(b); E.appendChild(cell); }); }
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
 function closeDetail(){ $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
+const transcodeFallback=new Set();
 function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
   vodBase=vodDur?Math.floor(percent/100*vodDur):0; curPct=percent;
   const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
-  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}&dur=${vodDur||0}`;   // 带上时长:服务端据此在源断开时无缝续接,并区分'源断了'与'真到片尾'
+  const url=`/vod-stream?channelId=${encodeURIComponent(ep.channelId)}&ip=${ep.ip}&port=${ep.port}&percent=${percent}&dur=${vodDur||0}&mode=${ep.sourceMode===0?0:1}&transcode=${transcodeFallback.has(ep.channelId)?1:0}`;   // 带上时长:服务端据此在源断开时无缝续接,并区分'源断了'与'真到片尾'
   startPlay(title,url,false); updEpBtns();
   pushRecent({key:'vod:'+curFilm.playid,type:'vod',title:curFilm.title,epname:ep.playname,film:curFilm});
   { const le=LS.get('txtv_lastep',{}); le[curFilm.playid]=curEpIdx; LS.set('txtv_lastep',le); }  // 记录本片上次看到的集
@@ -413,7 +428,10 @@ function setSide(collapsed){ APP.classList.toggle('collapsed',collapsed); $('sid
 function toggleSide(){ const c=!APP.classList.contains('collapsed'); setSide(c);
   if(layoutMode()==='desk' && !fsEl()){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面常规模式记忆开合;抽屉(手机/全屏)按场景自动开合,不记忆
 try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
-function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+let activeStreamSid='';
+function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
+  url+=(url.includes('?')?'&':'?')+'sid='+activeStreamSid;
+  isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   if(inDrawer()) setSide(true);   // 抽屉模式(横屏手机/全屏中):一开始播放就把抽屉收起来
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
@@ -426,14 +444,17 @@ function startPlay(title,url,isLive){ isLiveNow=isLive; window.curUrl=url; windo
      liveBufferLatencyChasing:false,
      liveSync:isLive, liveSyncMaxLatency:isLive?30:1.2, liveSyncTargetLatency:isLive?18:0.8, liveSyncPlaybackRate:1.08,
      lazyLoad:false,   // 必须关:开着的话缓冲超过30秒 mpegts 会主动断开网络连接(暂停时缓冲正好很足) -> 服务端拆流 -> 恢复时只能重新请求 -> 黑屏重缓冲。缓冲量由服务端节流(60秒)控制,不需要它
-      stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:30, autoCleanupMinBackwardDuration:20});
+      // 保留最近四分钟已播放内容，方向键回退可直接在 MSE 缓冲内定位。
+      stashInitialSize:1048576, autoCleanupSourceBuffer:true, autoCleanupMaxBackwardDuration:300, autoCleanupMinBackwardDuration:240});
   player.attachMediaElement(V); player.load();
   // 点播起播/跳进度:先攒够预缓冲再播。直接在canplay就播(那时才1-2秒缓冲)会"放几秒就卡",
   // 卡了又触发恢复重取,表现就是"播几秒->缓冲->回退->再播几秒"。恢复流程自带更大的余量,不覆盖它。
-  if(!isLive && !pendingResumeAt){ pendingResumeAt = vodBase + 0.1; pendingMargin = START_PREBUFFER; }
+  if(!isLive && !pendingResumeAt){ pendingResumeAt = vodBase + 0.1;
+    pendingMargin = curEps[curEpIdx]?.sourceMode===0 ? 12 : START_PREBUFFER; }  // 旧点播原片起播后曾连续 11 秒断供，先跨过首轮冷启动空窗
   V.oncanplay=()=>{ if(!pendingResumeAt) $('load').classList.remove('show'); switching=false; V.playbackRate=isLive?1:curSpeed;
     if(!isLive){$('totT').textContent=fmt(vodDur); $('seek').max=vodDur||1000; updateSeekBar();}};
-  player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b); });
+  player.on(mpegts.Events.ERROR,(a,b)=>{ console.warn('mpegts error',a,b);
+    if(!isLive && (b===mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED || b===mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED)) fallbackToTranscode(); });
   if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
   else V.play().catch(()=>{});
   flashUI();
@@ -522,6 +543,8 @@ document.addEventListener('fullscreenchange',onFSChange); document.addEventListe
 // iOS 不允许网页改 video.volume(设了读回来仍是1):那就改 Web Audio 链路末端的总增益,效果一样
 const volumeSettable=(()=>{ try{ const o=V.volume; V.volume=0.37; const ok=Math.abs(V.volume-0.37)<0.01; V.volume=o; return ok; }catch(e){ return false; } })();
 let curVol=1;
+// 调试用 ?silent=1：刷新或自动恢复播放前先静音，不改变日常访问的音量设置。
+if(new URLSearchParams(location.search).get('silent')==='1') V.muted=true;
 function applyVol(v){ curVol=Math.max(0,Math.min(1,+(+v).toFixed(2))); V.muted=false;
   if(volumeSettable) V.volume=curVol; else { initAudioOnce(); if(masterGain) masterGain.gain.value=curVol; }
   $('vol').value=curVol; updVolIcon(); }
@@ -529,6 +552,7 @@ function pop(text,ms){ const p=$('volpop'); p.textContent=text; p.classList.add(
 $('vol').addEventListener('input',e=>{ applyVol(parseFloat(e.target.value)); V.muted=curVol===0; updVolIcon(); });
 $('volBtn').onclick=()=>{ V.muted=!V.muted; $('vol').value=V.muted?0:curVol; updVolIcon(); };
 function updVolIcon(){ $('volBtn').textContent=(V.muted||curVol===0)?'🔇':(curVol<0.5?'🔉':'🔊'); }
+updVolIcon();
 function setVolAbs(v){ applyVol(v); pop('🔊 '+Math.round(curVol*100)+'%'); }
 function setVol(delta){ setVolAbs(curVol+delta); }
 let saveTimer=null, lastSave=0;
@@ -548,9 +572,12 @@ $('seek').addEventListener('mousemove',e=>{ if(isLiveNow||!vodDur){ $('seekTip')
   const r=$('seek').getBoundingClientRect(); const frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
   const t=$('seekTip'); t.textContent=fmt(frac*vodDur); t.style.left=e.clientX+'px'; t.style.top=(r.top-9)+'px'; t.style.display='block'; });
 $('seek').addEventListener('mouseleave',()=>{ $('seekTip').style.display='none'; });
+function bufferedVideoTime(absSec){ const t=absSec-vodBase;
+  for(let i=0;i<V.buffered.length;i++) if(t>=V.buffered.start(i)+0.05 && t<=V.buffered.end(i)-0.05) return t;
+  return null; }
 function commitSeek(absSec){ if(!curFilm||!vodDur)return; absSec=Math.max(0,Math.min(vodDur-1,absSec));
-  const bufEnd=V.buffered.length?vodBase+V.buffered.end(V.buffered.length-1):vodBase;
-  if(absSec>=vodBase && absSec<=bufEnd){ V.currentTime=absSec-vodBase; saveState(); return; }  // 缓冲内:精确无缝
+  const local=bufferedVideoTime(absSec);
+  if(local!=null){ V.currentTime=local; saveState(); return; }  // 真正缓冲内:精确无缝
   // 缓冲外:整数百分点重取。前进时保证新起点严格晚于当前位置,绝不后退(整数粒度下宁可多进一点也不倒退)
   const curAbs=vodBase+V.currentTime; let pct=Math.round(absSec/vodDur*100);
   if(absSec>curAbs){ while(pct/100*vodDur<=curAbs+1 && pct<96) pct++; }
@@ -560,6 +587,7 @@ function seekBy(delta){ if(isLiveNow||!curFilm||!vodDur)return; flashUI();
   const base=(seekTarget!=null)?seekTarget:(vodBase+V.currentTime);
   seekTarget=Math.max(0,Math.min(vodDur-1,base+delta));
   dragging=true; $('seek').value=seekTarget; $('curT').textContent=fmt(seekTarget); updateSeekBar();  // 立即视觉反馈,先不取流
+  if(bufferedVideoTime(seekTarget)!=null){ const t=seekTarget; seekTarget=null; dragging=false; clearTimeout(seekTimer); commitSeek(t); return; }
   clearTimeout(seekTimer); seekTimer=setTimeout(()=>{ const t=seekTarget; seekTarget=null; dragging=false; commitSeek(t); },800); }   // 800ms:连按方向键合并成停手后的一次重取。每次重取都是一路全新P2P取流,高频start/stop会毒死原生引擎,所以宁可晚一点也不要churn
 // —— 键盘 ——
 document.addEventListener('keydown',e=>{
@@ -612,7 +640,11 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   }catch(e){} fromRecovery=false; recovering=false; }, (Date.now()-streamStartedAt<25000 ? 4000 : (recoverTimes<=2?600:0)) || Math.min(10000,600*Math.pow(2,recoverTimes-2)));
   // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
 }
-V.addEventListener('error', ()=>{ if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
+function fallbackToTranscode(){ const ep=curEps[curEpIdx]; if(!player||!ep||transcodeFallback.has(ep.channelId))return false;
+  transcodeFallback.add(ep.channelId); const pct=vodDur?Math.max(curPct,Math.floor((vodBase+V.currentTime)/vodDur*100)):curPct;
+  console.warn('原片编码不受支持，改用转码',ep.channelId); playEpisode(Math.min(96,pct)); return true; }
+V.addEventListener('error', ()=>{ if(!isLiveNow && V.error && V.error.code===4 && fallbackToTranscode())return;
+  if(!recovering && !switching) doRecover(); });   // 真解码错误(罕见);切流期间不误触发
 V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。
                                     // (注:回调已换成App自己的VodPlayActivity实例以消除崩溃,tell==2不再回传JS,故不依赖它)
                                     // 位置没到片尾就ended = 源中途EOF/故障 -> 从当前位置重取续播
@@ -705,7 +737,7 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
   // 恢复等待期间按"目标位置之后还有多少"上报(否则服务端会以为缓冲已满而停止供数,永远等不到目标)
   const a = pendingResumeAt ? Math.max(0, bufEndAbs-pendingResumeAt)
                             : (V.buffered.length?(V.buffered.end(V.buffered.length-1)-V.currentTime):0);
-  fetch('/api/buf?d='+a.toFixed(1)).catch(()=>{});   // 保活 + 上报缓冲量给服务端节流
+  fetch('/api/buf?sid='+activeStreamSid+'&d='+a.toFixed(1)).catch(()=>{});   // 只上报本次播放的缓冲量，旧流不能节流新流
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了(暂停期间被服务端掐了)就从当前位置重连,把缓冲用满再接。缓冲多=不动还能看很久;健康播放常驻56-60s永不触发;暂停不查(上面!V.paused)
   if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
   if(a < 6 && !V.paused && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;   // 暂停时不做见底判断(不消耗缓冲,也不该重取)

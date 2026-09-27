@@ -19,7 +19,7 @@ const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const PKG = 'com.wys.iptvgo';
 const CREDS_FILE = __dirname + '/creds.json';  // 本地保存的登录凭据(gitignore,永不进仓库),用于登出/重置后自动登录
 const PORT = process.env.PORT || 8090;
-const IDLE_MS = parseInt(process.env.IDLE_MS || '90000', 10);
+const IDLE_MS = parseInt(process.env.IDLE_MS || '600000', 10);  // 短暂离开页面不反复冷启动模拟器(一次约几十秒)
 const FRIDA_BIN = '/data/local/tmp/frida-server';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -30,32 +30,22 @@ function readDevFile(dev){
     const buf = Buffer.from(b64.replace(/\s/g,''), 'base64'); return buf.length>0 ? buf : null;
   } catch(e){ return null; }
 }
-// FFmpeg 容错解码 + 硬件重编码
-function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec){
+// 直播继续硬件转码；点播原片可浏览器解码时只转封装，保留低开销与原生供数速度。
+function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec, transcodeVod=false){
   // 直播:开 ffmpeg 底层重连,扛 P2P 抖动。
   // 点播:不开重连。点播源的 HTTP 连接只在两种情况下结束:内容真到结尾,或它的 P2P 会话被 vodStop 掉。
   // 连接断了由 serveStream 的 onSegEnd 负地续接(重新 vodStart + -ss 跳过重叠),ffmpeg 自己不重连。
   const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
-  // 读速:
-  // 直播 1x 实时读 + 断供后 catchup 4x 回填 + initial_burst 开台垫底(实测稳定攒 ~11 秒深缓冲)。
-  // 点播固定 2x(比播放快一倍地攒缓冲,配合前端上报的 60 秒背压上限)。
-  // 2026-09-05 实测点播本地源的真实行为(直连原始端口,不经 ffmpeg):按下载进度供数,约 1MB/s 突发(约为 1.95Mbps 片源的 4 倍),
-  // 读到已下载尽头时**停顿几秒等下载,不关连接**;全速读 7 分钟、按 2x 码率限速读 150 秒、停读 60 秒再续读,都不断。
-  // 以前日志里大量"源断开于 6-11s"其实是服务端晚到的 stop() 把新会话停掉造成的(见 queueStop),不是读速问题。
-  // 所以历史上关于 EOF 的结论(reconnect_at_eof 无用 / initial_burst 撞 EOF / 2x 撞尽头)都是在那个 bug 存在时观察到的,不再当作依据;
-  // 读速本身不改(2x 保持),initial_burst 暂不加(未在无 bug 条件下重测,先不动)。
+  // 直播按实时读并允许追赶；点播由客户端缓冲深度控制背压，不额外限制读速。
+  // 本机实测旧点播原始 TS 在 20 秒供数 37 MB，旧硬件重编码同时间仅输出 0.5 MB。
   const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15']
-                      : ['-readrate','2.0'];
-  // 视频编码:
-  // 直播固定 8M ABR(1080p59 高动态,同一好链路的直播观看,现状 OK)。
-  // 点播改恒定质量 -q:v + 限峰值 -maxrate/-bufsize:输出码率随内容复杂度自适应,绝不把低码率片源放大。
-  // 缘由(2026-09-10 实测):黄石S2E1 源仅 838Kbps/606p,旧的 -b:v 8M 把它硬编成 7.9Mbps、再叠 2x 读=峰值~16Mbps,
-  // 弱 Wi-Fi 的客户端撑不住->缓冲被反复抽干(电视原生直接放 838Kbps 故不卡)。同源实测 -q:v 55 只产出~2.3Mbps、
-  // 画质对 606p 绰绰有余;复杂 1080p 片会自然升到 -maxrate 3.5M 封顶。读速不动(2x),仍由前端 60s 背压节流。
-  // 若某设备仍卡,先把 -q:v 往下调(更省带宽)、再看 -maxrate;这是链路带宽问题,不是读速问题。
+                      : [];
+  // 仅在浏览器不支持原片编码时使用已有的低码率硬件转码兜底。
   const venc = isLive
     ? ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
-    : ['-c:v','h264_videotoolbox','-q:v','50','-maxrate','1500k','-bufsize','3M','-g','60','-pix_fmt','yuv420p'];   // 2026-09-11:硬封顶 1.5M。2.15M 时用户设备仍卡,diag 显示卡时缓冲贴0、输出~270KB/s(≈播放码率)、源不静默不节流=链路带宽波动掉到≈播放码率,缓冲攒不起;恢复瞬间输出冲595KB/s(~4.7M)证明链路好时能跑。降到远低于链路(接近原生838K鲁棒性)让弱链路波动时也能持续攒缓冲。代价:真高码率片被压1.5M略软(可靠性优先)。读速不动,这是带宽问题不是读速。
+    : transcodeVod ? ['-c:v','h264_videotoolbox','-q:v','50','-maxrate','1500k','-bufsize','3M','-g','60','-pix_fmt','yuv420p']
+                   : ['-c:v','copy'];
+  const aenc=(!isLive&&!transcodeVod) ? ['-c:a','copy'] : ['-c:a','aac','-b:a','160k','-ac','2'];
   const rwto = isLive ? ['-rw_timeout','30000000'] : [];   // 点播:根本不设读超时。ffmpeg只要连接(页面)还开着就一直活,暂停多久都不自杀;页面关/掉线→res close→teardown回收(见serveStream);真卡死(源挂/App崩)由前端看门狗冻结~24s重取兜底。直播保留30s,与-reconnect配套扛P2P抖动
   const seek = (skipSec>0.05) ? ['-ss', skipSec.toFixed(3)] : [];             // 续接时跳过与上一段重叠的部分,避免重复内容
   const tsoff = (tsOffsetSec>0.05) ? ['-output_ts_offset', tsOffsetSec.toFixed(3)] : [];  // 让新一段的时间戳接着上一段走,客户端看到的是一条连续的流
@@ -65,7 +55,7 @@ function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec){
     ...rate,
     ...seek, '-i','http://127.0.0.1:'+srcPort+'/',
     ...venc,
-    '-c:a','aac','-b:a','160k','-ac','2',
+    ...aenc,
     ...tsoff, '-f','mpegts','-muxdelay','0','-muxpreload','0','pipe:1'];
   const ff=spawn(FFMPEG,args,{stdio:['ignore','pipe','pipe']});
   let errbuf='';
@@ -77,8 +67,26 @@ function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec){
 // ---------- 引擎(模拟器)生命周期 ----------
 let state='off', bootStep='', bootPromise=null;
 let script=null, session=null, catalog=null;
+// VOD 元数据来自模拟器里的远端请求；切换分类和重新打开详情不应每次再等一次网络往返。
+const vodCache = new Map();
+async function cachedVod(key, ttlMs, load){
+  const now=Date.now(), hit=vodCache.get(key);
+  if(hit && (hit.promise || hit.expires>now)){
+    vodCache.delete(key); vodCache.set(key,hit);
+    return hit.promise || hit.value;
+  }
+  const entry={promise:null,value:null,expires:0};
+  const promise=Promise.resolve().then(load);
+  entry.promise=promise; vodCache.delete(key); vodCache.set(key,entry);
+  while(vodCache.size>160) vodCache.delete(vodCache.keys().next().value);
+  try{
+    const value=await promise;
+    if(vodCache.get(key)===entry){ entry.value=value; entry.promise=null; entry.expires=Date.now()+ttlMs; }
+    return value;
+  }catch(e){ if(vodCache.get(key)===entry) vodCache.delete(key); throw e; }
+}
 // current: 当前活动流。token=递增唯一标识(不用端口,端口会复用);ended=收到tellMessage(2)真结束;ffExited=ffmpeg已退出
-let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false };
+let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null };
 let curBuf=0;  // 前端上报的点播缓冲深度(秒),用于反馈节流
 let lastActivity=Date.now();
 let activeLogins=0;
@@ -98,8 +106,9 @@ function queueStop(token){ streamMutex = streamMutex.then(async()=>{ if(current.
 function cleanupCurrent(){
   const tok=current.token;
   if(current.ff){ try{current.ff.kill('SIGKILL');}catch(e){} }
+  if(current.res && !current.res.writableEnded){ try{current.res.end();}catch(e){} }
   if(current.port){ queueStop(tok); adb(['forward','--remove','tcp:'+current.port]); }
-  current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+  current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
 }
 
 let needColdRestart=false;
@@ -117,7 +126,12 @@ async function bootEmulator(){
       bootStep='启动取流引擎…'; if(!fridaServerUp()){ adbSu('nohup '+FRIDA_BIN+' >/dev/null 2>&1 &'); await sleep(1500); }
       if(needColdRestart){ bootStep='冷重启应用…'; adb(['shell','am','force-stop',PKG]); await sleep(2000); needColdRestart=false; }
       let coldLaunch=false;
-      if(!appRunning()){ adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']); coldLaunch=true; }
+      if(!appRunning()){
+        adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']);
+        // 部分模拟器上 monkey 找不到 Leanback 入口并以 -5 退出；显式启动 APK 的登录入口。
+        if(!appRunning()) adb(['shell','am','start','-n',PKG+'/.activity.LoginActivity']);
+        coldLaunch=true;
+      }
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
       if(coldLaunch){ bootStep='等待应用启动…'; await sleep(4000); }  // 短暂等应用进程起来再注入,随后按真实信号放行(不再盲等12s)
       bootStep='注入引擎…'; await attach();
@@ -164,8 +178,8 @@ async function shutdownEmulator(reason){ if(state==='off')return; state='off'; c
   adb(['emu','kill']);
   for(let i=0;i<20 && emulatorRunning();i++){ await sleep(500); }  // 等模拟器真正退出,避免重启时新进程撞上正在死亡的模拟器
   bootStep=''; console.log('[engine] off (内存已释放)'); }
-// —— 诊断采样(排查频繁短缓冲):每3秒记 客户端缓冲curBuf / 是否节流 / 输出KB每秒。DIAG=0 关闭 ——
-if(process.env.DIAG!=='0'){ let _lastOut=0, _lastT=Date.now();
+// —— 诊断采样(排查频繁短缓冲):需要时用 DIAG=1 打开 ——
+if(process.env.DIAG==='1'){ let _lastOut=0, _lastT=Date.now();
   setInterval(()=>{ try{
     if(current.ff && !current.ffExited && current.chid && (''+current.chid).startsWith('vod')){
       const now=Date.now(); const dt=(now-_lastT)/1000||1; const ob=current.outTotal||0;
@@ -189,6 +203,7 @@ let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请
 const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
 function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
   const mySeq = ++reqSeq;   // 同步取号(在排队之前),后来者会让先来者作废
+  const mySid=typeof req.query.sid==='string' ? req.query.sid.slice(0,64) : '';
   try{ req.socket.setKeepAlive(true, 30000); }catch(e){}   // TCP保活:暂停时页面还在→对端TCP栈会答保活探测→连接判活→ffmpeg不释放;页面真没了(断网/睡眠/崩)→探测无应答→连接断→res close→teardown回收。这才是"页面在不在"的正解,取代分不清暂停/掉线的读超时
   streamMutex = streamMutex.then(async()=>{
     const myToken = current.token + 1;
@@ -203,7 +218,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       const hadStream=!!current.port; cleanupCurrent();
       // 立刻用新 token 占位(在 stop/settle 之前):一来 /api/streamstate 立即显示 alive(starting),前端看门狗不会在重取期间误判断流来抢流;
       // 二来上一路流若正在续接(onSegEnd),它每一步都核对 token,看到已换流就立刻作废,不会再去 vodStop/vodStart 干扰这一路
-      current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true };
+      current={ token:myToken, chid:label, port:0, ff:null, ended:false, ffExited:false, starting:true, sid:mySid };
       // 等上一路 P2P 会话真正 stop 完再起新流,并给原生引擎一点收尾时间(settle),否则快速重取(seek)可能拿到不出数据的死端口
       if(hadStream){ try{ if(script) await script.exports.stop(); }catch(e){} await sleep(700); }
 
@@ -226,7 +241,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
         // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
         for(let sub=1; sub<=3 && !aborted; sub++){
-        cand=spawnTranscode(port, isLive, nearEndVod);
+        cand=spawnTranscode(port, isLive, nearEndVod, 0, 0, !!(vod&&vod.transcode));
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
         const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer;
         gotData = await new Promise(resolve=>{
@@ -259,7 +274,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         if(ff){ try{ff.kill('SIGKILL');}catch(e){} }
         try{ if(script) await script.exports.stop(); }catch(e){}   // 必须await:否则这个stop会晚到,把用户下一次seek刚起的流停掉(端口有效却无数据)
         if(myPort) adb(['forward','--remove','tcp:'+myPort]);
-        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
         // 前端等不及先走了,但本次确实遇到过死端口=引擎已坏。必须在这里也自愈,否则前端反复重试、
         // 每次都走abort分支跳过自愈 -> 引擎一直毒着 -> 用户看到"播放中断"。正常seek不会有死端口,不会误触发
         if(deadPortCount>0 && state==='ready' && !nearEndVod){
@@ -269,7 +284,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         return;
       }
       if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
-        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false};
+        current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
         if(state==='ready' && !nearEndVod){   // 坏端口(-1000)或连续死端口(端口有效却不出数据)都说明P2P引擎已坏,冷重启自愈   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App自愈。但点播接近片尾的坏端口多半是"内容真结束",不算卡死,不冷重启(前端会判作播完跳下一集)
           console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
           needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
@@ -278,7 +293,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         return;
       }
 
-      current={ token:myToken, chid:label, port:myPort, ff, ended:false, ffExited:false, starting:false };
+      current={ token:myToken, chid:label, port:myPort, ff, res, ended:false, ffExited:false, starting:false, sid:mySid };
       curBuf=0;
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');
@@ -345,7 +360,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
             adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
             if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
             myPort = r.port;
-            const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec);
+            const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec, !!(vod&&vod.transcode));
             ff = cand;                                 // 立刻登记为当前段:客户端此刻离开时 teardown 才杀得到它
             if(current.token===myToken){ current.ff = cand; current.port = r.port; current.ffExited=false; }
             wire(cand);                                // 边等首字节边直接转发(不丢头);它若在 splicing 期间退出,onSegEnd 会直接返回,由这里的循环处理
@@ -384,11 +399,11 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         }catch(e){}
       }, 1000);
       // 拆掉正在播放的流(用户seek/切集换流、关页面时走这里)。
-      const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false};
+      const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false,sid:null};
         queueStop(myToken); } };   // 排队 stop 时再次核对 token(见 queueStop):若此后已有新流启动,这个 stop 作废,否则会把新流的 P2P 会话停掉
       res.on('close',teardown); res.on('error',teardown);
     } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
-      if(current.token===myToken && current.starting){ current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false}; }
+      if(current.token===myToken && current.starting){ current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false,sid:null}; }
     }
     finally { req.removeListener('close', onEarlyClose); }
   });
@@ -405,7 +420,7 @@ app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
 app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, curBuf, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着;恢复时前端据此判断要不要重连
-app.get('/api/buf', (req,res)=>{ curBuf=parseFloat(req.query.d)||0; res.json({ok:true}); });  // 前端上报点播缓冲深度
+app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid) curBuf=Math.max(0,parseFloat(req.query.d)||0); res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——
 app.get('/api/loginstate', async (req,res)=>{
@@ -442,7 +457,7 @@ app.post('/api/login', async (req,res)=>{
     }
     if (st.activated) {
       try { fs.writeFileSync(CREDS_FILE, JSON.stringify({ account, password }), { mode:0o600 }); } catch(e){}
-      catalog = null;
+      catalog = null; vodCache.clear(); vodBase=null; vodRootPath=null;
       res.json({ ok:true, account });
     } else {
       console.log('[login] 原生应用未完成激活 channels='+(st.channels||0)+' accountLoaded='+!!st.account);
@@ -456,7 +471,7 @@ app.post('/api/logout', async (req,res)=>{
     await script.exports.saveCreds('', '');   // 清空 prefs 凭据
     try { fs.unlinkSync(CREDS_FILE); } catch(e){}
     needColdRestart = true; try { if (session) await session.detach(); } catch(e){}
-    catalog = null; res.json({ ok:true });
+    catalog = null; vodCache.clear(); vodBase=null; vodRootPath=null; res.json({ ok:true });
   } catch(e){ res.status(500).json({ error: ''+(e.message||e) }); }
 });
 
@@ -474,32 +489,57 @@ app.post('/api/leave', async (req,res)=>{ cleanupCurrent(); res.json({ok:true});
 const xml = new XMLParser({ ignoreAttributes:false, cdataPropName:'cdata', trimValues:true });
 function txt(node){ if(node==null) return ''; if(typeof node==='object'){ if('cdata'in node) return (''+node.cdata).trim(); if('#text'in node) return (''+node['#text']).trim(); return ''; } return (''+node).trim(); }
 function arr(x){ return Array.isArray(x)?x:(x==null?[]:[x]); }
-let vodBase=null, vodRootPath=null;
+let vodBase=null, vodRootPath=null, vodInitPromise=null;
 async function vodInit(){ if(vodBase&&vodRootPath)return;
-  const u=await script.exports.vodUrls(); const root=xml.parse(await script.exports.vodGet(u.VODROOT_URL));
-  const rp=txt(((root.vod_addrs||{}).vod_addr||{}).addr)||'/gotv/root_cn.xml';
-  vodBase=u.VODBASE_URL; vodRootPath=rp; }   // 两个一起赋值,避免部分失败缓存坏值
+  if(!vodInitPromise) vodInitPromise=(async()=>{
+    const u=await script.exports.vodUrls(); const root=xml.parse(await script.exports.vodGet(u.VODROOT_URL));
+    if(!root.vod_addrs) throw new Error('点播目录根地址暂不可用');
+    const rp=txt(((root.vod_addrs||{}).vod_addr||{}).addr)||'/gotv/root_cn.xml';
+    vodBase=u.VODBASE_URL; vodRootPath=rp;
+  })().finally(()=>{ vodInitPromise=null; });
+  await vodInitPromise;
+}
 async function vodFetch(path){ await ensureReady(); await vodInit(); const full=/^https?:|^\d/.test(path)?path:(vodBase+path); return script.exports.vodGet(full); }
+function parseVod(raw, root){ const data=xml.parse(raw); if(!data[root]) throw new Error('点播数据暂不可用'); return data; }
+function decryptOld(s){ const key=Buffer.from('FB0D2346'.repeat(3)); const dec=crypto.createDecipheriv('des-ede3',key,null); return Buffer.concat([dec.update(Buffer.from(txt(s),'base64')),dec.final()]).toString('utf8'); }
 
 app.get('/api/vod/categories', async (req,res)=>{
-  try { await ensureReady(); await vodInit();
-    const data=xml.parse(await script.exports.vodGet(vodBase+vodRootPath));
-    const types=arr((data.Typelist||{}).Types).map(t=>({type:txt(t.type),tag:txt(t.tag),link:txt(t.link),sub:txt(t.sub)}))
+  try { res.json(await cachedVod('categories',10*60*1000,async()=>{
+    await ensureReady(); await vodInit();
+    const data=parseVod(await script.exports.vodGet(vodBase+vodRootPath),'Typelist');
+    const types=arr(data.Typelist.Types).map(t=>({type:txt(t.type),tag:txt(t.tag),link:txt(t.link),sub:txt(t.sub)}))
       .filter(t=>['电影','电视剧','短剧','综艺','动漫','纪录片','体育'].includes(t.type));
-    res.json({categories:types});
+    return {categories:types};
+  }));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 app.get('/api/vod/list', async (req,res)=>{
   try { const path=req.query.path; if(!path) return res.status(400).json({error:'no path'});
-    const data=xml.parse(await vodFetch(path));
-    const films=arr((data.Playlist||{}).film).map(f=>({filmid:txt(f.filmid),title:txt(f.title),pic:txt(f.pic),remark:txt(f.remark),playid:txt(f.playid)}));
-    res.json({films});
+    res.json(await cachedVod('list:'+path,5*60*1000,async()=>{
+      const data=parseVod(await vodFetch(path),'Playlist');
+      const films=arr(data.Playlist.film).map(f=>({filmid:txt(f.filmid),title:txt(f.title),pic:txt(f.pic),remark:txt(f.remark),playid:txt(f.playid)}));
+      return {films};
+    }));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 app.get('/api/vod/detail', async (req,res)=>{
   try { const playid=req.query.playid; if(!playid) return res.status(400).json({error:'no playid'});
-    const data=xml.parse(await vodFetch(playid)); const f=(data.PlayInfo||{}).film||{};
-    const eps=arr(((data.PlayInfo||{}).playurl||{}).playid).map(p=>{
+    res.json(await cachedVod('detail:'+playid,30*60*1000,async()=>{
+    if(playid.startsWith('old:')){
+      const m=/^old:([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+\.xml)$/.exec(playid);
+      if(!m) throw new Error('旧点播地址无效');
+      await ensureReady();
+      const data=parseVod(await script.exports.vodGetOld('vod/xml2/'+m[1]+'/'+m[2]+'/'+m[3]),'category');
+      const f=data.category.file||{};
+      const eps=arr((f.links||{}).link).map(p=>{
+        const server=decryptOld(p.server1), colon=server.lastIndexOf(':');
+        if(colon<0) return null;
+        return {playname:txt(p.filmname),channelId:decryptOld(p.filmid),ip:server.slice(0,colon),port:parseInt(server.slice(colon+1),10),duration:Math.floor((parseInt(txt(p.duration),10)||0)/1000),sourceMode:0};
+      }).filter(p=>p&&Number.isInteger(p.port));
+      return {film:{title:txt(data.category['@_name']),actor:txt(f.actor),director:txt(f.director),type:txt(f.v_type),area:txt(f.country),year:txt(f.releasedate),content:txt(f.description)},episodes:eps};
+    }
+    const data=parseVod(await vodFetch(playid),'PlayInfo'); const f=data.PlayInfo.film||{};
+    const eps=arr((data.PlayInfo.playurl||{}).playid).map(p=>{
       const tag=txt(p.playtag); const src= tag.startsWith('relay')?txt(p.relay).slice(8):txt(p.udp).slice(6);
       const slash=src.indexOf('/'); if(slash<0) return null;
       const server=src.slice(0,slash); const channelId=src.slice(slash+1);
@@ -508,42 +548,90 @@ app.get('/api/vod/detail', async (req,res)=>{
       if(!Number.isInteger(port)) return null;
       return {playname:txt(p.playname),channelId,ip,port,playtag:tag,duration:parseInt(txt(p.duration)||'0',10)};
     }).filter(Boolean);
-    res.json({film:{title:txt(f.title),actor:txt(f.actor),director:txt(f.director),type:txt(f.type),area:txt(f.area),year:txt(f.year),content:txt(f.content),remark:txt(f.remark)},episodes:eps});
+    return {film:{title:txt(f.title),actor:txt(f.actor),director:txt(f.director),type:txt(f.type),area:txt(f.area),year:txt(f.year),content:txt(f.content),remark:txt(f.remark)},episodes:eps};
+    }));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 
 function toInitials(han){ return pinyin(han,{pattern:'first',toneType:'none',type:'array'}).join('').toUpperCase().replace(/[^A-Z]/g,''); }
+function searchTitle(s){ return String(s||'').normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu,''); }
+// 目录只登记中文名的已知英文原名；Silo 出现在本片海报上，但两套搜索索引都不收它。
+const titleAliases=new Map([['silo','末日地堡']]);
+function seasonInfo(title){
+  const name=searchTitle(title), m=name.match(/第([一二三四五六七八九十\d]+)季$/);
+  if(!m) return {base:name,season:0};
+  const nums={一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10};
+  return {base:name.slice(0,m.index),season:Number(m[1])||nums[m[1]]||0};
+}
+function mergeSearchResults(lists, q, initials, isName){
+  const query=searchTitle(q), grouped=new Map();
+  for(const list of lists) for(const f of list){
+    const title=searchTitle(f.title);
+    if(!title || !(title.includes(query) || (!isName && toInitials(f.title).startsWith(initials)))) continue;
+    let group=grouped.get(title);
+    if(!group){ group={...f,sources:[]}; grouped.set(title,group); }
+    if(!group.sources.some(s=>s.type===f.type&&s.playid===f.playid)) group.sources.push(f);
+  }
+  const films=[...grouped.values()];
+  // 同片多源时优先环球剧场：实测第二季起播供数更快；电视点播仍可在详情页切换。
+  for(const f of films){
+    f.sources.sort((a,b)=>(a.type==='new'?0:1)-(b.type==='new'?0:1));
+    Object.assign(f,{pic:f.sources[0].pic,remark:f.sources[0].remark,playid:f.sources[0].playid,type:f.sources[0].type});
+  }
+  const baseOrder=new Map();
+  for(const f of films){ const base=seasonInfo(f.title).base; if(!baseOrder.has(base)) baseOrder.set(base,baseOrder.size); }
+  films.sort((a,b)=>{
+    const an=searchTitle(a.title), bn=searchTitle(b.title);
+    const ap=an.startsWith(query)||(!isName&&toInitials(a.title).startsWith(initials));
+    const bp=bn.startsWith(query)||(!isName&&toInitials(b.title).startsWith(initials));
+    if(ap!==bp) return ap?-1:1;
+    const as=seasonInfo(a.title), bs=seasonInfo(b.title);
+    return as.base===bs.base ? as.season-bs.season : baseOrder.get(as.base)-baseOrder.get(bs.base);
+  });
+  return films.slice(0,80);
+}
 app.get('/api/search', async (req,res)=>{
   try { const q=(req.query.q||'').trim(); if(!q) return res.json({films:[]});
-    await ensureReady(); await vodInit();
-    const hanMatch=q.match(/[一-鿿]+/); let searchKey,filterTerm,isName;
-    if(hanMatch){ searchKey=toInitials(hanMatch[0]); filterTerm=hanMatch[0]; isName=true; }
-    else { searchKey=q.toUpperCase().replace(/[^A-Z0-9]/g,''); filterTerm=q; isName=false; }
+    const lookup=titleAliases.get(searchTitle(q))||q;
+    const hanMatch=lookup.match(/[一-鿿]+/); let searchKey,isName;
+    if(hanMatch){ searchKey=toInitials(hanMatch[0]); isName=true; }
+    else { searchKey=lookup.toUpperCase().replace(/[^A-Z0-9]/g,''); isName=false; }
     if(!searchKey) return res.json({films:[], initials:''});
-    const fetchFilms=async key=>{
+    // 同一首字母的不同输入复用两套原始索引结果：用户从 MRDB 改搜中文全名时无需再访问远端。
+    res.json(await cachedVod('search:'+q,10*1000,async()=>{
+    await ensureReady();
+    const oldSearch=()=>cachedVod('searchOld:'+searchKey,5*60*1000,async()=>{
+      const raw=await script.exports.vodSearchOld(searchKey);
+      const data=JSON.parse(raw);
+      return arr(data.items).map(f=>({filmid:txt(f.folder),title:txt(f.name),pic:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.img),remark:txt(f.v_type),playid:'old:'+txt(f.category)+'/'+txt(f.folder)+'/'+txt(f.url),type:'old'}))
+        .filter(f=>/^old:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\.xml$/.test(f.playid));
+    });
+    const fetchFilms=key=>cachedVod('searchNewRaw:'+key,5*60*1000,async()=>{
       const raw=await script.exports.vodSearch('vod',key,'all',0);
-      let data; try{ data=JSON.parse(raw); }catch(e){ return null; }
-      return (data.filmlist||[]).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:f.type}));
-    };
-    const matchName=list=>{
-      const pre=list.filter(f=>(f.title||'').startsWith(filterTerm));
-      const inc=list.filter(f=>!(f.title||'').startsWith(filterTerm)&&(f.title||'').includes(filterTerm));
-      return pre.concat(inc);
-    };
-    let films=await fetchFilms(searchKey);
-    if(!films) return res.status(502).json({error:'搜索返回异常'});
-    if(isName){
-      films=matchName(films);
-      // 搜索服务的长首字母索引有漏项；例如 MRDB 漏掉“末日地堡”，MR 却能查到三季。
-      // 仅在精确结果为空时用前两字回查，仍按完整中文标题过滤。
-      if(!films.length && searchKey.length>2){
-        searchKey=searchKey.slice(0,2);
-        films=await fetchFilms(searchKey);
-        if(!films) return res.status(502).json({error:'搜索返回异常'});
-        films=matchName(films);
+      const data=JSON.parse(raw);
+      return arr(data.filmlist).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:'new'}));
+    });
+    const newSearch=async()=>{
+      // 环球剧场的完整拼音索引会漏掉第一季；先查短前缀，再用完整片名过滤。
+      // 前缀结果为空或接近列表上限时再补查完整拼音，通常省去一次远端请求。
+      const key=searchKey.length>2?searchKey.slice(0,2):searchKey;
+      let broad; try{ broad=await fetchFilms(key); }
+      catch(e){ if(key===searchKey) throw e; return fetchFilms(searchKey); }
+      if(key!==searchKey && (broad.length>=80 || !mergeSearchResults([broad],lookup,searchKey,isName).length)){
+        try{ return broad.concat(await fetchFilms(searchKey)); }
+        catch(e){ if(!broad.length) throw e; }
       }
-    }
-    res.json({query:q, initials:searchKey, count:films.length, films:films.slice(0,80)});
+      return broad;
+    };
+    const found=await Promise.allSettled([oldSearch(),newSearch()]);
+    if(found.every(r=>r.status==='rejected')) throw new Error('两套点播搜索暂不可用');
+    for(let i=0;i<found.length;i++) if(found[i].status==='rejected')
+      console.log('[search] '+(i?'环球剧场':'电视点播')+'查询失败:',String(found[i].reason).slice(0,100));
+    const films=mergeSearchResults(found.map(r=>r.status==='fulfilled'?r.value:[]),lookup,searchKey,isName);
+    return {query:q,initials:searchKey,count:films.length,films,
+      source:found.every(r=>r.status==='fulfilled')?'电视点播 + 环球剧场':(found[0].status==='fulfilled'?'电视点播':'环球剧场'),
+      partial:found.some(r=>r.status==='rejected')};
+    }));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 
@@ -551,8 +639,9 @@ app.get('/vod-stream', (req,res)=>{
   const {channelId, ip, port}=req.query; const percent=Math.max(0,Math.min(96,parseInt(req.query.percent||'0',10)||0));  // 上限96:冷启动在最后几%会撞P2P文件尾edge-catch;向前播放可正常到真片尾
   if(!channelId||!ip||!port){ return res.status(400).end('bad params'); }
   const dur=parseFloat(req.query.dur||'0')||0;   // 影片总时长:服务端据此判断"源断了"还是"真到片尾",并算出续接点
-  const mkPlay=(pct)=>{ if(!script) throw new Error('引擎未就绪'); return script.exports.vodPlay(channelId, ip, parseInt(port,10), pct); };
-  serveStream(req,res,()=>mkPlay(percent), 'vod:'+channelId, false, percent>=90, {dur, percent, mkPlay});   // percent>=90 视为接近片尾
+  const mode=req.query.mode==='0'?0:1;
+  const mkPlay=(pct)=>{ if(!script) throw new Error('引擎未就绪'); return script.exports.vodPlay(channelId, ip, parseInt(port,10), pct, mode); };
+  serveStream(req,res,()=>mkPlay(percent), 'vod:'+channelId, false, percent>=90, {dur, percent, mkPlay, transcode:req.query.transcode==='1'});   // percent>=90 视为接近片尾
 });
 
 // ---------- 海报(P2P 下载 + 缓存,小并发池) ----------
@@ -561,13 +650,14 @@ const posterInflight=new Map();
 async function fetchPoster(pic, local, key, ext){
   if(posterInflight.has(key)) return posterInflight.get(key);
   const pr=(async()=>{ await ensureReady();
-    const dev='/data/data/'+PKG+'/files/txtvp_'+key+ext; const r=await script.exports.dlPoster(pic,dev);
+    const dev='/data/data/'+PKG+'/files/txtvp_'+key+ext;
+    const r=pic.startsWith('old:') ? await script.exports.dlPosterOld(pic.slice(4),dev) : await script.exports.dlPoster(pic,dev);
     if(r&&r.ret===0){ const buf=readDevFile(dev); if(buf&&buf.length>100) fs.writeFileSync(local,buf); try{execFileSync(ADB,['shell','su','-c','rm -f "'+dev+'"']);}catch(e){} }
   })().catch(e=>console.error('[poster]',e&&e.message)).finally(()=>posterInflight.delete(key));
   posterInflight.set(key,pr); return pr;
 }
 app.get('/poster', async (req,res)=>{
-  const pic=req.query.pic||''; if(!/^\/[\w./-]+\.(jpe?g|png)$/i.test(pic)) return res.status(400).end('bad');
+  const pic=req.query.pic||''; if(!/^(?:\/[\w./-]+|old:[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\.(jpe?g|png)$/i.test(pic)) return res.status(400).end('bad');
   const key=crypto.createHash('md5').update(pic).digest('hex'); const ext=(pic.match(/\.(jpe?g|png)$/i)||['.jpg'])[0].toLowerCase();
   const local=pathMod.join(POSTER_DIR,key+ext);
   const serve=()=>{ res.setHeader('Cache-Control','public, max-age=604800'); res.sendFile(local); };

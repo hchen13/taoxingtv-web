@@ -1,5 +1,5 @@
 📦
-488628 /agent-src.js
+490690 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13740,6 +13740,18 @@ var require_agent_src = __commonJS({
           }
         }));
       },
+      dlPosterOld: function(pic, devPath) {
+        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+          try {
+            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+            const VC = frida_java_bridge_default.use("dnet.VideoClient");
+            const url = CD.VODBASE_URL.value + "vod/pic/" + pic + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+            resolve({ ret: VC.icBigFile(url, devPath, null, 0) });
+          } catch (e) {
+            reject("" + (e.stack || e));
+          }
+        }));
+      },
       vodSearch: function(db, keywords, type, scope) {
         return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
           try {
@@ -13747,6 +13759,31 @@ var require_agent_src = __commonJS({
             const VC = frida_java_bridge_default.use("dnet.VideoClient");
             const url = CD.VODSEARCH_URL.value + "?db=" + db + "&keywords=" + keywords + "&type=" + (type || "all") + "&scope=" + (scope || 0) + "&name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
             resolve(VC.icSearch(url));
+          } catch (e) {
+            reject("" + (e.stack || e));
+          }
+        }));
+      },
+      // 电视首页“点播”使用旧 com.vod 目录；它的拼音索引与“环球剧场”不同。
+      vodSearchOld: function(keywords) {
+        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+          try {
+            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+            const VC = frida_java_bridge_default.use("dnet.VideoClient");
+            const url = CD.VODSEARCH_URL.value + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408&keywords=" + keywords + "&im=pinyin";
+            resolve(VC.icSearch(url));
+          } catch (e) {
+            reject("" + (e.stack || e));
+          }
+        }));
+      },
+      vodGetOld: function(path) {
+        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+          try {
+            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+            const VC = frida_java_bridge_default.use("dnet.VideoClient");
+            const url = CD.VODBASE_URL.value + path + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+            resolve(VC.icStaticDecode(url));
           } catch (e) {
             reject("" + (e.stack || e));
           }
@@ -13827,7 +13864,7 @@ var require_agent_src = __commonJS({
           }
         }));
       },
-      vodPlay: function(channelId, ip, port, percent) {
+      vodPlay: function(channelId, ip, port, percent, mode) {
         return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
           let step = "start";
           try {
@@ -13845,7 +13882,7 @@ var require_agent_src = __commonJS({
             const cb = ensureCB();
             const p = parseInt(port, 10);
             step = "vodStart";
-            const port_ = VC.vodStart(channelId, ip, p, ip, p, ip, p, percent | 0, cb, 1);
+            const port_ = VC.vodStart(channelId, ip, p, ip, p, ip, p, percent | 0, cb, mode === 0 ? 0 : 1);
             resolve({ port: port_ });
           } catch (e) {
             reject("at[" + step + "]: " + (e && (e.stack || e.message || e) || "unknown"));
