@@ -69,21 +69,29 @@ let state='off', bootStep='', bootPromise=null;
 let script=null, session=null, catalog=null;
 // VOD 元数据来自模拟器里的远端请求；切换分类和重新打开详情不应每次再等一次网络往返。
 const vodCache = new Map();
-async function cachedVod(key, ttlMs, load){
+async function cachedVod(key, ttlMs, load, staleMs=0){
   const now=Date.now(), hit=vodCache.get(key);
   if(hit && (hit.promise || hit.expires>now)){
     vodCache.delete(key); vodCache.set(key,hit);
     return hit.promise || hit.value;
   }
-  const entry={promise:null,value:null,expires:0};
-  const promise=Promise.resolve().then(load);
+  const stale=hit?.value!=null && hit.staleUntil>now ? hit : null;
+  const entry={promise:null,value:null,expires:0,staleUntil:0};
+  const promise=Promise.resolve().then(load).then(value=>{
+    if(vodCache.get(key)===entry){ entry.value=value; entry.promise=null; entry.expires=Date.now()+ttlMs; entry.staleUntil=entry.expires+staleMs; }
+    return value;
+  },e=>{
+    if(stale){
+      console.warn('[vod cache] 使用旧数据 '+key+': '+String(e.message||e).slice(0,120));
+      if(vodCache.get(key)===entry) Object.assign(entry,{value:stale.value,promise:null,expires:Date.now()+15000,staleUntil:stale.staleUntil});
+      return stale.value;
+    }
+    if(vodCache.get(key)===entry) vodCache.delete(key);
+    throw e;
+  });
   entry.promise=promise; vodCache.delete(key); vodCache.set(key,entry);
   while(vodCache.size>160) vodCache.delete(vodCache.keys().next().value);
-  try{
-    const value=await promise;
-    if(vodCache.get(key)===entry){ entry.value=value; entry.promise=null; entry.expires=Date.now()+ttlMs; }
-    return value;
-  }catch(e){ if(vodCache.get(key)===entry) vodCache.delete(key); throw e; }
+  return promise;
 }
 // current: 当前活动流。token=递增唯一标识(不用端口,端口会复用);ended=收到tellMessage(2)真结束;ffExited=ffmpeg已退出
 let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null };
@@ -488,7 +496,7 @@ app.post('/api/login', async (req,res)=>{
     }
     if (st.activated) {
       try { fs.writeFileSync(CREDS_FILE, JSON.stringify({ account, password }), { mode:0o600 }); } catch(e){}
-      catalog = null; vodCache.clear(); vodBase=null; vodRootPath=null;
+      catalog = null; vodCache.clear(); vodBase=null;
       res.json({ ok:true, account });
     } else {
       console.log('[login] 原生应用未完成激活 channels='+(st.channels||0)+' accountLoaded='+!!st.account);
@@ -502,7 +510,7 @@ app.post('/api/logout', async (req,res)=>{
     await script.exports.saveCreds('', '');   // 清空 prefs 凭据
     try { fs.unlinkSync(CREDS_FILE); } catch(e){}
     needColdRestart = true; try { if (session) await session.detach(); } catch(e){}
-    catalog = null; vodCache.clear(); vodBase=null; vodRootPath=null; res.json({ ok:true });
+    catalog = null; vodCache.clear(); vodBase=null; res.json({ ok:true });
   } catch(e){ res.status(500).json({ error: ''+(e.message||e) }); }
 });
 
@@ -525,13 +533,13 @@ app.post('/api/leave', async (req,res)=>{ cleanupCurrent(); res.json({ok:true});
 const xml = new XMLParser({ ignoreAttributes:false, cdataPropName:'cdata', trimValues:true });
 function txt(node){ if(node==null) return ''; if(typeof node==='object'){ if('cdata'in node) return (''+node.cdata).trim(); if('#text'in node) return (''+node['#text']).trim(); return ''; } return (''+node).trim(); }
 function arr(x){ return Array.isArray(x)?x:(x==null?[]:[x]); }
-let vodBase=null, vodRootPath=null, vodInitPromise=null;
-async function vodInit(){ if(vodBase&&vodRootPath)return;
+let vodBase=null, vodInitPromise=null;
+async function vodInit(){ if(vodBase)return;
   if(!vodInitPromise) vodInitPromise=(async()=>{
-    const u=await script.exports.vodUrls(); const root=xml.parse(await script.exports.vodGet(u.VODROOT_URL));
-    if(!root.vod_addrs) throw new Error('点播目录根地址暂不可用');
-    const rp=txt(((root.vod_addrs||{}).vod_addr||{}).addr)||'/gotv/root_cn.xml';
-    vodBase=u.VODBASE_URL; vodRootPath=rp;
+    // 搜索结果已给出完整 playid；取详情只需要基址。额外请求目录根节点既慢又会因上游 +3 阻断有效详情。
+    const u=await script.exports.vodUrls();
+    if(!u.VODBASE_URL) throw new Error('环球剧场点播基址尚未就绪');
+    vodBase=u.VODBASE_URL;
   })().finally(()=>{ vodInitPromise=null; });
   await vodInitPromise;
 }
@@ -553,7 +561,7 @@ async function nativeVodCategories(){ return cachedVod('native-categories',10*60
   }).filter(c=>c&&c.type);
   if(!categories.length) throw new Error('原生点播目录没有可用分类');
   return {categories};
-}); }
+},60*60*1000); }
 
 app.get('/api/vod/categories', async (req,res)=>{
   try { res.json(await nativeVodCategories());
@@ -576,13 +584,13 @@ app.get('/api/vod/list', async (req,res)=>{
           return {filmid:playid.split('/')[1],title:txt(f.name),pic:'old:'+pic,remark:'',playid:'old:'+playid,type:'old'};
         }catch(e){return null;} }).filter(Boolean);
         return {films,page,pages};
-      }));
+      },60*60*1000));
     }
     res.json(await cachedVod('list:'+path,5*60*1000,async()=>{
       const data=parseVod(await vodFetch(path),'Playlist');
       const films=arr(data.Playlist.film).map(f=>({filmid:txt(f.filmid),title:txt(f.title),pic:txt(f.pic),remark:txt(f.remark),playid:txt(f.playid)}));
       return {films};
-    }));
+    },60*60*1000));
   } catch(e){ console.warn('[vod list]',e.message||e); res.status(503).json({error:''+(e.message||e)}); }
 });
 app.get('/api/vod/detail', async (req,res)=>{
@@ -612,7 +620,7 @@ app.get('/api/vod/detail', async (req,res)=>{
       return {playname:txt(p.playname),channelId,ip,port,playtag:tag,duration:parseInt(txt(p.duration)||'0',10)};
     }).filter(Boolean);
     return {film:{title:txt(f.title),actor:txt(f.actor),director:txt(f.director),type:txt(f.type),area:txt(f.area),year:txt(f.year),content:txt(f.content),remark:txt(f.remark)},episodes:eps};
-    }));
+    },60*60*1000));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
 });
 
@@ -686,13 +694,16 @@ function fetchNewSearch(key){
     return arr(data.filmlist).map(f=>({filmid:f.filmid,title:f.title,pic:f.pic,remark:f.remark,playid:f.playxml,type:'new'}));
   });
 }
-async function newSearch(ctx){
+async function newSearch(ctx,onBroad){
   const {searchKey,lookup,isName}=ctx;
   // 环球剧场的完整拼音索引会漏掉第一季；先查短前缀，再用完整片名过滤。
   const key=searchKey.length>2?searchKey.slice(0,2):searchKey;
   let broad; try{ broad=await fetchNewSearch(key); }
   catch(e){ if(key===searchKey) throw e; return fetchNewSearch(searchKey); }
-  if(key!==searchKey && (broad.length>=80 || !mergeSearchResults([broad],lookup,searchKey,isName).length)){
+  const matched=key!==searchKey ? mergeSearchResults([broad],lookup,searchKey,isName) : [];
+  if(key!==searchKey && (broad.length>=80 || !matched.length)){
+    // 精确索引补查仍在进行时先把短前缀命中的结果送到页面，第一季无需等补查结束。
+    if(matched.length) onBroad?.(broad);
     try{ return broad.concat(await fetchNewSearch(searchKey)); }
     catch(e){ if(!broad.length) throw e; }
   }
@@ -700,15 +711,19 @@ async function newSearch(ctx){
 }
 async function searchCatalogs(ctx,onProgress){
   await ensureReady();
-  const found=[null,null], started=Date.now();
-  const calls=[()=>oldSearch(ctx.searchKey),()=>newSearch(ctx)];
+  const found=[null,null], done=[false,false], started=Date.now();
+  const calls=[()=>oldSearch(ctx.searchKey),()=>newSearch(ctx,broad=>{
+    found[1]={status:'fulfilled',value:broad};
+    if(onProgress) onProgress(searchResult(ctx,found,false));
+  })];
   await Promise.all(calls.map(async(call,i)=>{
     const t0=Date.now();
     try{ found[i]={status:'fulfilled',value:await call()}; }
     catch(e){ found[i]={status:'rejected',reason:e};
       console.log('[search] '+(i?'环球剧场':'电视点播')+'查询失败:',String(e).slice(0,100)); }
+    done[i]=true;
     console.log('[search] '+(i?'环球剧场':'电视点播')+' '+ctx.searchKey+' '+(Date.now()-t0)+'ms');
-    if(onProgress && !found.every(Boolean) && found.some(r=>r?.status==='fulfilled')) onProgress(searchResult(ctx,found,false));
+    if(onProgress && !done.every(Boolean) && found.some(r=>r?.status==='fulfilled')) onProgress(searchResult(ctx,found,false));
   }));
   if(found.every(r=>r.status==='rejected')) throw new Error('两套点播搜索暂不可用');
   console.log('[search] 合并 '+ctx.searchKey+' '+(Date.now()-started)+'ms');

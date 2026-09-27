@@ -245,6 +245,45 @@ applyLayout();
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 filmsCache=LS.get('txtv_native_pages_v1',{});
+const DETAIL_FRESH_MS=5*60*1000, DETAIL_STALE_MS=24*60*60*1000;
+let detailCache=LS.get('txtv_details_v1',{}), searchCache=LS.get('txtv_search_v1',{});
+const detailRequests=new Map();
+function cachedDetail(playid){ const c=detailCache[playid]; return c?.data?.film && Array.isArray(c.data.episodes) && Date.now()-c.at<DETAIL_STALE_MS ? c : null; }
+function rememberDetail(playid,d){
+  delete detailCache[playid]; detailCache[playid]={at:Date.now(),data:d};
+  while(Object.keys(detailCache).length>24) delete detailCache[Object.keys(detailCache)[0]];
+  LS.set('txtv_details_v1',detailCache);
+}
+function requestDetail(playid){
+  const c=cachedDetail(playid);
+  if(c && Date.now()-c.at<DETAIL_FRESH_MS) return Promise.resolve(c.data);
+  if(detailRequests.has(playid)) return detailRequests.get(playid);
+  const p=jget('api/vod/detail?playid='+encodeURIComponent(playid)).then(d=>{
+    if(!d?.film || !Array.isArray(d.episodes)) throw new Error('选集数据无效');
+    rememberDetail(playid,d); return d;
+  }).finally(()=>detailRequests.delete(playid));
+  detailRequests.set(playid,p); return p;
+}
+function cachedSearch(q){ const c=searchCache['q:'+q]; return c?.data?.films && Date.now()-c.at<60*60*1000 ? c : null; }
+function rememberSearch(q,d){
+  if(!d.complete || d.partial) return;
+  delete searchCache['q:'+q]; searchCache['q:'+q]={at:Date.now(),data:d};
+  while(Object.keys(searchCache).length>12) delete searchCache[Object.keys(searchCache)[0]];
+  LS.set('txtv_search_v1',searchCache);
+}
+let prefetchGeneration=0, prefetchTimer=null;
+function prefetchDetail(f){ const selected=f.sources?.[0]||f; if(selected?.playid) requestDetail(selected.playid).catch(()=>{}); }
+function scheduleDetailPrefetch(list){
+  const generation=++prefetchGeneration; clearTimeout(prefetchTimer);
+  // 只暖首屏前三项，逐个请求；切换分类或点开详情立即停止后续预取。
+  prefetchTimer=setTimeout(async()=>{
+    for(const f of list.slice(0,3)){
+      if(generation!==prefetchGeneration) break;
+      const selected=f.sources?.[0]||f;
+      if(selected?.playid && !cachedDetail(selected.playid)) await requestDetail(selected.playid).catch(()=>{});
+    }
+  },400);
+}
 
 async function bootOnce(){ startWakeProg();
   let st=await jget('api/status');
@@ -338,12 +377,13 @@ function showVodLoadError(message,retry){ const L=$('listVod'); L.innerHTML=''; 
   const b=document.createElement('button'); b.className='retry'; b.textContent='重试'; b.onclick=retry; d.append(document.createElement('br'),b); L.appendChild(d); }
 function catCacheKey(path,page){ return path+'@'+page; }
 function showCatPage(path,page,my){ curPage=page; const key=catCacheKey(path,page), cached=filmsCache[key]; $('listVod').scrollTop=0;
-  if(cached){ films=cached.films; curPages=cached.pages; renderFilms(null,{page,pages:curPages}); }
-  loadFilms(path,page,my,!cached); }
-function selectCat(key){ activeSearch?.close(); activeSearch=null; const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
+  if(cached){ films=cached.films; curPages=cached.pages; renderFilms(null,{page,pages:curPages}); scheduleDetailPrefetch(films); }
+  if(!cached?.at || Date.now()-cached.at>60000) loadFilms(path,page,my,!cached); }
+function selectCat(key){ activeSearch?.close(); activeSearch=null; ++prefetchGeneration; clearTimeout(prefetchTimer); const my=++reqSeq; curCat=key; if($('vq').value)$('vq').value=''; highlightCat();   // 同步记录选择+高亮,立即以最新为准
   if(key==='recent'){ showRecent(); return; }
   showCatPage(key,1,my); }
 function selectCatPage(page){ if(page<1||page>curPages||curCat==='search'||curCat==='recent')return;
+  ++prefetchGeneration; clearTimeout(prefetchTimer);
   showCatPage(curCat,page,++reqSeq); }
 function ensureDefaultSelection(){ if(curCat==null && cats.length && !$('vq').value.trim()){ selectCat(cats[0].link); } }   // 只在还没有任何选择时才选默认,不覆盖用户选择
 async function loadCats(){
@@ -367,44 +407,61 @@ function showRecent(){ const r=getRecent(); const L=$('listVod'); L.innerHTML=''
 async function loadFilms(path,page,my,showLoading){ if(my==null) my=++reqSeq;
   if(showLoading) $('listVod').innerHTML='<div class="muted">加载中…</div>';
   let d; try{ d=await jget('api/vod/list?path='+encodeURIComponent(path)+'&page='+page); }
-  catch(e){ if(showLoading && my===reqSeq && curCat===path && curPage===page)showVodLoadError('加载失败：'+(e.message||e),()=>showCatPage(path,page,++reqSeq)); return; }
-  const key=catCacheKey(path,page), entry={films:d.films||[],pages:d.pages||1};
-  const changed=JSON.stringify(entry)!==JSON.stringify(filmsCache[key]);
+  catch(e){ if(my===reqSeq && curCat===path && curPage===page){
+    if(showLoading) showVodLoadError('加载失败：'+(e.message||e),()=>showCatPage(path,page,++reqSeq));
+    else { $('listVod').querySelector('.vodCacheWarning')?.remove();
+      const banner=document.createElement('div'); banner.className='muted vodCacheWarning'; banner.textContent='显示缓存列表 · 更新失败';
+      const retry=document.createElement('button'); retry.className='retry'; retry.textContent='重试'; retry.onclick=()=>loadFilms(path,page,reqSeq,false);
+      banner.append(' ',retry); $('listVod').prepend(banner); }
+  } return; }
+  $('listVod').querySelector('.vodCacheWarning')?.remove();
+  const key=catCacheKey(path,page), entry={films:d.films||[],pages:d.pages||1,at:Date.now()};
+  const changed=JSON.stringify(entry.films)!==JSON.stringify(filmsCache[key]?.films) || entry.pages!==filmsCache[key]?.pages;
   filmsCache[key]=entry;
   while(Object.keys(filmsCache).length>24) delete filmsCache[Object.keys(filmsCache)[0]];
   LS.set('txtv_native_pages_v1',filmsCache);
-  if(my===reqSeq && curCat===path && curPage===page && (showLoading || changed)){ films=entry.films; curPages=entry.pages; renderFilms(null,{page,pages:curPages}); }
+  if(my===reqSeq && curCat===path && curPage===page && (showLoading || changed)){ films=entry.films; curPages=entry.pages; renderFilms(null,{page,pages:curPages}); scheduleDetailPrefetch(films); }
 }
 let vqTimer=null, activeSearch=null, vqComposing=false;
 function queueSearch(q,immediate=false){
-  clearTimeout(vqTimer); activeSearch?.close(); activeSearch=null;
+  clearTimeout(vqTimer); activeSearch?.close(); activeSearch=null; ++prefetchGeneration; clearTimeout(prefetchTimer);
   ++reqSeq; curCat='search'; highlightCat();
   if(!q){ const chips=document.querySelectorAll('#cats button'); if(chips[1])chips[1].click(); return; }
   if(!immediate && [...q].length<2){ $('listVod').innerHTML='<div class="muted">继续输入片名，或按回车搜索单字</div>'; return; }
-  $('listVod').innerHTML='<div class="muted">搜索中…</div>';
-  vqTimer=setTimeout(()=>searchVod(q),immediate?0:550);
+  const cached=cachedSearch(q);
+  if(cached){ films=cached.data.films||[]; renderFilms(searchHead(cached.data,' · 缓存')); scheduleDetailPrefetch(films); }
+  else $('listVod').innerHTML='<div class="muted">搜索中…</div>';
+  if(cached && Date.now()-cached.at<3*60*1000) return;
+  vqTimer=setTimeout(()=>searchVod(q,cached?.data),immediate?0:300);
 }
 $('vq').addEventListener('compositionstart',()=>{ vqComposing=true; clearTimeout(vqTimer); activeSearch?.close(); activeSearch=null; ++reqSeq; });
 $('vq').addEventListener('compositionend',e=>{ vqComposing=false; queueSearch(e.target.value.trim()); });
 $('vq').addEventListener('input',e=>{ if(!vqComposing&&!e.isComposing) queueSearch(e.target.value.trim()); });
 $('vq').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!vqComposing){ e.preventDefault(); queueSearch(e.target.value.trim(),true); } });
-function searchVod(q){ const my=++reqSeq; let lastResult=null;
+function searchHead(d,suffix=''){ return '搜到 '+d.count+' 部（'+(d.source||'点播')+' · 首字母 '+d.initials+(d.complete?'':' · 另一套目录查询中')+(d.partial?' · 部分目录暂不可用':'')+'）'+suffix; }
+function searchVod(q,fallback=null){ const my=++reqSeq; let lastResult=fallback;
   const stream=new EventSource('api/search/stream?q='+encodeURIComponent(q)); activeSearch=stream;
   stream.onmessage=e=>{
     if(my!==reqSeq || $('vq').value.trim()!==q){ stream.close(); return; }
     let d; try{d=JSON.parse(e.data);}catch(_){return;}
-    if(d.error){ $('listVod').textContent='搜索失败: '+d.error; stream.close(); activeSearch=null; return; }
+    if(d.error){
+      if(fallback){ films=fallback.films||[]; renderFilms(searchHead(fallback,' · 更新失败，显示缓存')); }
+      else $('listVod').textContent='搜索失败: '+d.error;
+      stream.close(); activeSearch=null; return;
+    }
     if(d.complete){ stream.close(); activeSearch=null; }
+    if(fallback && !d.complete) return;
     lastResult=d; films=d.films||[];
+    if(d.complete){ rememberSearch(q,d); scheduleDetailPrefetch(films); }
     if(!films.length){
       $('listVod').textContent=d.complete?'没找到"'+q+'"相关节目':'正在查询另一套目录…'; return;
     }
-    renderFilms('搜到 '+d.count+' 部（'+(d.source||'点播')+' · 首字母 '+d.initials+(d.complete?'':' · 另一套目录查询中')+(d.partial?' · 部分目录暂不可用':'')+'）');
+    renderFilms(searchHead(d));
   };
   stream.onerror=()=>{ if(my===reqSeq && activeSearch===stream){
     stream.close(); activeSearch=null;
     if(!lastResult) $('listVod').textContent='搜索连接中断，请重试';
-    else renderFilms('搜到 '+lastResult.count+' 部（'+lastResult.source+' · 另一套目录连接中断）');
+    else renderFilms(searchHead(lastResult,' · 连接中断，显示已有结果'));
   } };
 }
 function renderFilms(head,paging){ const L=$('listVod'); L.innerHTML='';
@@ -414,28 +471,41 @@ function renderFilms(head,paging){ const L=$('listVod'); L.innerHTML='';
     const pic=f.pic?`<img class="thumb" loading="lazy" src="poster?pic=${encodeURIComponent(f.pic)}&v=3" onerror="this.classList.add('noimg')">`:'<span class="thumb noimg"></span>';
     el.innerHTML=pic; const name=document.createElement('span'); name.className='nm'; name.textContent=f.title;
     const remark=document.createElement('span'); remark.className='rk'; remark.textContent=f.sources?.length>1?f.sources.length+' 个片源':(f.remark||'');
-    el.append(name,remark); el.onclick=()=>openDetail(f); L.appendChild(el); });
+    el.append(name,remark); el.onclick=()=>openDetail(f);
+    el.onpointerenter=()=>{ el.prefetchTimer=setTimeout(()=>prefetchDetail(f),250); };
+    el.onpointerleave=()=>clearTimeout(el.prefetchTimer);
+    L.appendChild(el); });
   if(paging&&paging.pages>1){ const p=document.createElement('div'); p.className='pager';
     const prev=document.createElement('button'); prev.textContent='上一页'; prev.disabled=paging.page<=1; prev.onclick=()=>selectCatPage(paging.page-1);
     const next=document.createElement('button'); next.textContent='下一页'; next.disabled=paging.page>=paging.pages; next.onclick=()=>selectCatPage(paging.page+1);
     const label=document.createElement('span'); label.textContent=`${paging.page} / ${paging.pages} 页`; p.append(prev,label,next); L.appendChild(p); } }
-let lastDetail=null;
-async function openDetail(f,sourceIndex=0){ const my=++reqSeq, selected=f.sources?.[sourceIndex]||f;
-  $('detail').classList.add('show'); $('dTitle').textContent=f.title;
-  $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dSources').innerHTML=''; $('dPoster').style.backgroundImage='';
-  let d; try{ d=await jget('api/vod/detail?playid='+encodeURIComponent(selected.playid)); }catch(e){ if(my===reqSeq)$('dMeta').textContent='加载失败: '+(e.message||e); return; }
-  if(my!==reqSeq)return;
-  if(d.error){$('dMeta').textContent='加载失败: '+d.error;return;}
+let lastDetail=null, detailSeq=0;
+async function openDetail(f,sourceIndex=0){ const my=++detailSeq, selected=f.sources?.[sourceIndex]||f;
+  ++prefetchGeneration; clearTimeout(prefetchTimer);
+  $('detail').classList.add('show'); $('dTitle').textContent=f.title; lastDetail=null;
+  const cached=cachedDetail(selected.playid), fresh=cached && Date.now()-cached.at<DETAIL_FRESH_MS;
+  if(cached){ lastDetail={f,selected,sourceIndex,d:cached.data,stale:!fresh}; renderDetail(); if(fresh) return; }
+  else { $('dMeta').textContent='加载中…'; $('dDesc').textContent=''; $('dEps').innerHTML=''; $('dSources').innerHTML=''; $('dPoster').style.backgroundImage=''; }
+  let d; try{ d=await requestDetail(selected.playid); }
+  catch(e){
+    if(my!==detailSeq || !$('detail').classList.contains('show')) return;
+    if(cached){ lastDetail={f,selected,sourceIndex,d:cached.data,cacheError:true}; renderDetail(); }
+    else { $('dMeta').textContent='加载失败: '+(e.message||e); const b=document.createElement('button'); b.className='retry'; b.textContent='重试'; b.onclick=()=>openDetail(f,sourceIndex); $('dEps').replaceChildren(b); }
+    return;
+  }
+  if(my!==detailSeq || !$('detail').classList.contains('show')) return;
   lastDetail={f,selected,sourceIndex,d}; renderDetail(); }
-function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d}=lastDetail; const m=d.film;
+function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d,stale,cacheError}=lastDetail; const m=d.film;
   $('detail').classList.add('show'); $('dTitle').textContent=f.title;
   $('dPoster').style.backgroundImage=selected.pic?`url(poster?pic=${encodeURIComponent(selected.pic)}&v=3)`:'';
-  $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor)].filter(Boolean).join('  ·  ');
+  $('dMeta').textContent=[m.type,m.area,m.year,m.director&&('导演: '+m.director),m.actor&&('主演: '+m.actor),cacheError?'更新失败，显示缓存':stale?'正在更新…':''].filter(Boolean).join('  ·  ');
   $('dDesc').textContent=m.content||'';
   const S=$('dSources'); S.innerHTML='';
   if(f.sources?.length>1) f.sources.forEach((source,i)=>{
     const b=document.createElement('button'); b.textContent=source.type==='old'?'电视点播':'环球剧场';
-    b.classList.toggle('on',i===sourceIndex); b.onclick=()=>openDetail(f,i); S.appendChild(b);
+    b.classList.toggle('on',i===sourceIndex); b.onclick=()=>openDetail(f,i);
+    b.onpointerenter=()=>{ if(i!==sourceIndex) prefetchDetail(source); };
+    S.appendChild(b);
   });
   const E=$('dEps'); E.innerHTML='';
   const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
@@ -448,7 +518,7 @@ function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d}
     else if(curFilm&&curFilm.playid===selected.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
     b.onclick=()=>{ closeDetail(); curFilm=selected; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(selected.playid,i)); }; cell.appendChild(b); E.appendChild(cell); }); }
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
-function closeDetail(){ $('detail').classList.remove('show'); }
+function closeDetail(){ ++detailSeq; $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
 const transcodeFallback=new Set();
 function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
