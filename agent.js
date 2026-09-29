@@ -1,5 +1,5 @@
 📦
-491504 /agent-src.js
+491825 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13934,13 +13934,13 @@ var require_agent_src = __commonJS({
           }
         }));
       },
-      // 温和重授权:复刻原生 HomeActivity.doAuth() 的 icChart(挂表) -> icAuth(设备授权)。
+      // 温和重授权:复刻 LoginActivity 的挂表、播放选项及 HomeActivity 的设备授权顺序。
       // 为什么需要:普通冷启动(monkey拉起)后 activatedTime 一直是0,vodStart/playbackStart 直接返回
       // -1000(hint_master_or_option_error=没挂表/没授权)。原生靠首页UI流程跑这两步;我们无头绕过了UI,
       // 所以必须自己调。这比 am force-stop 整个App温和得多(force-stop+快速重启本身就是崩溃源)。
       reAuth: function() {
         return new Promise((resolve) => frida_java_bridge_default.perform(function() {
-          const out = { chart: null, auth: null, master: null, err: null };
+          const out = { chart: null, option: null, auth: null, master: null, err: null };
           try {
             const VC = frida_java_bridge_default.use("dnet.VideoClient");
             const CD = frida_java_bridge_default.use("com.wys.iptvgo.coredata.CoreData");
@@ -13950,6 +13950,13 @@ var require_agent_src = __commonJS({
               out.chart = VC.icChart(master);
             } catch (e) {
               out.err = "chart:" + (e.message || e);
+            }
+            try {
+              const optionUrl = CD.FAKE_OPTION_URL.value;
+              if (optionUrl) out.option = VC.icFakeOption(optionUrl);
+              else out.err = "option URL \u672A\u5C31\u7EEA";
+            } catch (e) {
+              out.err = "option:" + (e.message || e);
             }
             const c = master.indexOf(":");
             const ip = master.substring(0, c), port = parseInt(master.substring(c + 1), 10);

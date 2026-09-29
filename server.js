@@ -119,7 +119,12 @@ function cleanupCurrent(){
   current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
 }
 
-let needColdRestart=false;
+let needColdRestart=false, coldLaunchAt=0, coldStreamStarted=false, startupDeadPortFailures=0;
+function startupWarmup(){ return !!coldLaunchAt && !coldStreamStarted && Date.now()-coldLaunchAt<90000; }
+function shouldRestartAfterDeadPort(count){
+  if(startupWarmup() && (startupDeadPortFailures+=count)===1) return false;
+  return true;
+}
 async function bootEmulator(){
   if(state==='ready' && script && emulatorRunning()) return;
   if(bootPromise) return bootPromise;
@@ -138,12 +143,19 @@ async function bootEmulator(){
         adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']);
         // 部分模拟器上 monkey 找不到 Leanback 入口并以 -5 退出；显式启动 APK 的登录入口。
         if(!appRunning()) adb(['shell','am','start','-n',PKG+'/.activity.LoginActivity']);
-        coldLaunch=true;
+        coldLaunch=true; coldLaunchAt=Date.now(); coldStreamStarted=false; startupDeadPortFailures=0;
       }
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
       if(coldLaunch){ bootStep='等待应用启动…'; await sleep(1500); }
       bootStep='注入引擎…'; await attach();
-      const login=await script.exports.loginState();
+      let login=await script.exports.loginState();
+      if(!login.account && fs.existsSync(CREDS_FILE)){
+        bootStep='等待应用自动登录…';
+        for(let i=0;i<25 && !login.account;i++){
+          await sleep(1000);
+          login=await script.exports.loginState();
+        }
+      }
       if(!login.account){ console.log('[engine] 等待网页登录'); }
       else {
         bootStep='等待频道数据就绪…';
@@ -153,7 +165,8 @@ async function bootEmulator(){
           if(rdy.channels>0) break;
           await sleep(1500);
         }
-        if(rdy.channels>0 && !rdy.activated){
+        if(!rdy.channels) throw new Error('频道数据尚未就绪');
+        if(!rdy.activated){
           bootStep='等待应用设备授权…';
           for(let i=0;i<20 && !rdy.activated;i++){
             await sleep(1500);
@@ -161,10 +174,10 @@ async function bootEmulator(){
           }
         }
         console.log('[engine] 频道 '+(rdy.channels||0)+' 授权 '+!!rdy.activated);
-        if(rdy.channels>0 && !rdy.activated){
+        if(!rdy.activated){
           bootStep='设备授权中…';
           const a=await script.exports.reAuth();
-          console.log('[auth] 授权 chart='+a.chart+' auth='+a.auth+(a.err?' err='+a.err:''));
+          console.log('[auth] 授权 chart='+a.chart+' option='+a.option+' auth='+a.auth+(a.err?' err='+a.err:''));
           rdy=await script.exports.engineReady();
           if(!rdy.activated) throw new Error(a.auth===3?'设备授权超时（淘星返回码 3）':'设备授权失败（返回码 '+a.auth+(a.err?'，'+a.err:'')+'）');
         }
@@ -223,7 +236,7 @@ let prematureCount=0, prematureLabel='';   // 连续"有数据但很快提前结
                 // 这种情况前端会不停重起->更多churn->自我维持的死循环。连续多次即判引擎已坏,冷重启自愈
 let reqSeq=0;   // 请求序号:用户连按方向键时会连发多个取流请求,只有最新的才该触达原生。
                 // 旧请求若也去 vodStart 再被抛弃,就是"起流->没出数据->停掉"的高频churn,实测6次就能毒死P2P引擎
-const MAX_START_TRIES = 2;     // 死端口时内部重取次数:3→2(原生几乎不重调vodStart,churn=崩溃元凶);配合就绪门+首字节耐心,死端口本就罕见。首字节门限见 serveStream 内 firstByteMs
+const MAX_START_TRIES = 2;     // 常态最多两次原生取流；仅首次冷启动尚未成功出流时增加一次，避免重试 churn 毒死 P2P。
 function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
   const requestedAt=Date.now();
   const mySeq = ++reqSeq;   // 同步取号(在排队之前),后来者会让先来者作废
@@ -240,6 +253,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       if(isLive) console.log('['+label+'] 就绪等待 '+(Date.now()-requestedAt)+'ms');
       if(res.writableEnded||req.destroyed){ return; }          // 客户端已断开
       if(mySeq !== reqSeq && (aborted || req.destroyed)){ return; }   // 等待期间又被取代且客户端已走,同上
+      if(!script || !(await script.exports.loginState()).account) throw new Error('应用自动登录尚未完成');
       const hadStream=!!current.port; cleanupCurrent();
       // 立刻用新 token 占位(在 stop/settle 之前):一来 /api/streamstate 立即显示 alive(starting),前端看门狗不会在重取期间误判断流来抢流;
       // 二来上一路流若正在续接(onSegEnd),它每一步都核对 token,看到已换流就立刻作废,不会再去 vodStop/vodStart 干扰这一路
@@ -249,8 +263,9 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
 
       const firstByteMs = 12000;   // 首字节耐心:实测健康时 2.5-3.5 秒出数据,12秒已是3倍余量。
       // (曾设成30秒想"更有耐心",结果每次失败都要干等30秒、拖慢每一次拖进度,是过度矫正)
-      let ff=null, myPort=0, buffered=null, badPortCount=0, deadPortCount=0;
-      for(let attempt=1; attempt<=MAX_START_TRIES && !aborted; attempt++){
+      let ff=null, myPort=0, buffered=null, deadPortCount=0;
+      const maxStartTries=startupWarmup()?3:MAX_START_TRIES;
+      for(let attempt=1; attempt<=maxStartTries && !aborted; attempt++){
         if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         const playStarted=Date.now();
         const r = await playFn();
@@ -258,9 +273,13 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         if(aborted) break;
         if(!r || !r.port || r.port<=0){   // -1000 = 没挂表/没授权(hint_master_or_option_error),不是内容问题
-          badPortCount++;
-          console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+MAX_START_TRIES);
-          try{ const a=await script.exports.reAuth(); console.log('[auth] 坏端口->温和重授权 chart='+a.chart+' auth='+a.auth); }catch(e){}   // 先重挂表+重授权(原生的补救方式),比 force-stop 整个App温和,能避开churn引发的崩溃
+          console.log('['+label+'] play 返回坏端口('+(r&&r.port)+') 重试 '+attempt+'/'+maxStartTries);
+          if(r&&r.port===-1000 && attempt===1 && startupWarmup()){
+            // 刚自动登录的取流核心可能还在异步初始化；此时重挂表会和 App 自己的启动流程并发。
+            console.log('['+label+'] 冷启动取流核心未就绪，等 7 秒再试');
+            await sleep(7000); continue;
+          }
+          try{ const a=await script.exports.reAuth(); console.log('[auth] 坏端口->温和重授权 chart='+a.chart+' option='+a.option+' auth='+a.auth); }catch(e){}   // 原生登录顺序:挂表、加载选项、设备授权
           try{ if(script) await script.exports.stop(); }catch(e){}   // await:避免stop晚到把下次重取的新流停掉
           await sleep(800); continue;
         }
@@ -297,7 +316,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         }   // end sub loop
         if(ff) break;
         deadPortCount++;
-        console.log('['+label+'] 端口'+port+' 同端口重开3次仍无数据 -> 重新取流 '+attempt+'/'+MAX_START_TRIES);
+        console.log('['+label+'] 端口'+port+' 同端口重开3次仍无数据 -> 重新取流 '+attempt+'/'+maxStartTries);
         try{ if(script) await script.exports.stop(); }catch(e){}   // await:同上,防止晚到的stop杀掉下一次重取
         adb(['forward','--remove','tcp:'+port]);
         await sleep(800);
@@ -311,22 +330,31 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         // 前端等不及先走了,但本次确实遇到过死端口=引擎已坏。必须在这里也自愈,否则前端反复重试、
         // 每次都走abort分支跳过自愈 -> 引擎一直毒着 -> 用户看到"播放中断"。正常seek不会有死端口,不会误触发
         if(deadPortCount>0 && state==='ready' && !nearEndVod){
-          console.log('['+label+'] 客户端已放弃但出现死端口 -> 触发冷重启App自愈');
-          needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+          if(shouldRestartAfterDeadPort(deadPortCount)){
+            console.log('['+label+'] 客户端已放弃且死端口持续出现 -> 冷重启App自愈');
+            needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+          } else console.log('['+label+'] 冷启动首个死端口，保留正在初始化的App供下次重试');
         }
         return;
       }
       if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
-        if(state==='ready' && !nearEndVod){   // 坏端口(-1000)或连续死端口(端口有效却不出数据)都说明P2P引擎已坏,冷重启自愈   // 每次都拿到坏端口(如-1000)=原生P2P取流核心卡死(登录/频道都在但起不了流),触发冷重启App自愈。但点播接近片尾的坏端口多半是"内容真结束",不算卡死,不冷重启(前端会判作播完跳下一集)
-          console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
-          needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+        let restarting=false;
+        if(state==='ready' && !nearEndVod){
+          if(deadPortCount>0 && !shouldRestartAfterDeadPort(deadPortCount)){
+            console.log('['+label+'] 冷启动首个死端口，等待App完成初始化后重试');
+          } else {
+            console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
+            restarting=true;
+            needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+          }
         }
-        try{ res.status(502).end('播放启动失败:'+(badPortCount>=MAX_START_TRIES?'P2P核心卡死,正在自动重启,请稍候重试':'多次取流均无数据')); }catch(e){}
+        try{ res.status(502).end('播放启动失败:'+(restarting?'P2P核心卡死,正在自动重启,请稍候重试':'多次取流均无数据,请稍候重试')); }catch(e){}
         return;
       }
 
       current={ token:myToken, chid:label, port:myPort, ff, res, ended:false, ffExited:false, starting:false, sid:mySid };
+      coldStreamStarted=true;
       curBuf=0;
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');

@@ -192,18 +192,24 @@ rpc.exports = {
       } catch(e){ reject('' + (e.stack||e)); }
     }));
   },
-  // 温和重授权:复刻原生 HomeActivity.doAuth() 的 icChart(挂表) -> icAuth(设备授权)。
+  // 温和重授权:复刻 LoginActivity 的挂表、播放选项及 HomeActivity 的设备授权顺序。
   // 为什么需要:普通冷启动(monkey拉起)后 activatedTime 一直是0,vodStart/playbackStart 直接返回
   // -1000(hint_master_or_option_error=没挂表/没授权)。原生靠首页UI流程跑这两步;我们无头绕过了UI,
   // 所以必须自己调。这比 am force-stop 整个App温和得多(force-stop+快速重启本身就是崩溃源)。
   reAuth: function () {
     return new Promise((resolve) => Java.perform(function () {
-      const out = { chart: null, auth: null, master: null, err: null };
+      const out = { chart: null, option: null, auth: null, master: null, err: null };
       try {
         const VC = Java.use('dnet.VideoClient');
         const CD = Java.use('com.wys.iptvgo.coredata.CoreData');
         const master = '' + CD.master.value; out.master = master;
         try { out.chart = VC.icChart(master); } catch (e) { out.err = 'chart:' + (e.message || e); }
+        // LoginActivity 在挂表后还会加载播放选项；缺这步时 vodStart 可返回 -1000。
+        try {
+          const optionUrl = CD.FAKE_OPTION_URL.value;
+          if (optionUrl) out.option = VC.icFakeOption(optionUrl);
+          else out.err = 'option URL 未就绪';
+        } catch (e) { out.err = 'option:' + (e.message || e); }
         const c = master.indexOf(':');
         const ip = master.substring(0, c), port = parseInt(master.substring(c + 1), 10);
         const lang = '' + CD.LANGS.value[CD.langIndex.value];
