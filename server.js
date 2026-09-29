@@ -95,7 +95,7 @@ async function cachedVod(key, ttlMs, load, staleMs=0){
 }
 // current: 当前活动流。token=递增唯一标识(不用端口,端口会复用);ended=收到tellMessage(2)真结束;ffExited=ffmpeg已退出
 let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null };
-let curBuf=0;  // 前端上报的点播缓冲深度(秒),用于反馈节流
+let curBuf=0, curPaused=false, curBufAt=0, curPosAbs=0;  // 当前播放会话的缓冲深度、暂停状态和播放位置
 let lastActivity=Date.now();
 let activeLogins=0;
 
@@ -355,7 +355,8 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
 
       current={ token:myToken, chid:label, port:myPort, ff, res, ended:false, ffExited:false, starting:false, sid:mySid };
       coldStreamStarted=true;
-      curBuf=0;
+      curBuf=0; curPaused=false; curBufAt=0; curPosAbs=0;
+      current.lastData=Date.now();  // 首字节健康门限已收到数据；即使后续立刻静默也能计时检测
       console.log('['+label+'] port',myPort,'tok',myToken);
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
@@ -368,26 +369,51 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       const durSec = (vod && vod.dur>0) ? vod.dur : 0;
       const segStartAbs = durSec ? (vod.percent/100*durSec) : 0;
       let deliveredSec = 0, segOut = 0, splicing = false, finished = false, emptySplices = 0;
+      let bufPaused=false, probeStartedAt=0, probeBytes=0, nextProbeAt=Date.now()+30000, needDataAt=Date.now();
+      let exitedDuringSplice=null;
       let wantSplice = false;   // 停滞检测主动 SIGKILL 当前段并要求续接时置真(否则 SIGKILL 一律视为我们主动拆流,不续接)
       const readProgress = (d)=>{ const m=(''+d).match(/out_time_us=(\d+)/g); if(m&&m.length){ const v=parseInt(m[m.length-1].split('=')[1],10); if(!isNaN(v)) segOut = v/1e6; } };
+      const bufferedAhead = (now)=>Math.max(curBuf,
+        curPosAbs>0 && now-curBufAt<10000 && segOut>0
+          ? Math.max(0,segStartAbs+deliveredSec+segOut-curPosAbs) : 0);
+      // 实测 stdout.pause() 与 pipe(res) 配合时并未持续限流：状态显示已节流，浏览器缓冲仍涨到 500 秒以上。
+      // 暂停 ffmpeg 进程才能真正限制 MSE 缓冲；定期 SIGCONT 探测源健康。
+      const pauseSource = (proc)=>{ if(proc!==ff || bufPaused) return;
+        if(proc.kill('SIGSTOP')){ bufPaused=true; current.throttled=true; }
+      };
+      const resumeSource = (proc)=>{ if(proc!==ff || !bufPaused) return;
+        if(proc.kill('SIGCONT')){ bufPaused=false; current.throttled=false; }
+      };
 
       const wire = (proc)=>{
-        proc.stdout.on('data',(d)=>{ outBytes+=d.length; const now=Date.now(); if(current.token===myToken){ current.lastData=now; current.outTotal=(current.outTotal||0)+d.length; } if(now-lastBump>4000){ lastBump=now; lastActivity=now; } });
-        proc.stderr.on('data', readProgress);
+        proc.stdout.on('data',(d)=>{
+          if(proc!==ff) return;
+          outBytes+=d.length; const now=Date.now();
+          if(current.token===myToken){ current.lastData=now; current.outTotal=(current.outTotal||0)+d.length; }
+          if(now-lastBump>4000){ lastBump=now; lastActivity=now; }
+          // 节流期间定期只放行少量数据探测源是否还活着；收到足够数据就立刻重新背压。
+          if(probeStartedAt && proc===ff && outBytes-probeBytes>=65536){
+            probeStartedAt=0; nextProbeAt=now+30000;
+            const paused=curPaused && now-curBufAt<10000;
+            if(bufferedAhead(now)>(paused?160:100)) pauseSource(proc);
+          }
+        });
+        proc.stderr.on('data',d=>{ if(proc===ff) readProgress(d); });
         proc.stdout.pipe(res,{end:false});          // 不让某一段结束就把响应关掉
         proc.on('exit',(code,sig)=>{ onSegEnd(proc,sig); });
-        proc.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); try{res.end();}catch(_){} });
+        proc.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(!splicing) onSegEnd(proc,null); });
       };
 
       // 等某段 ffmpeg 出首字节:出了=true;先退出/超时=false
       const waitFirstByte = (proc, ms) => new Promise(resolve=>{ let settled=false;
-        const done=(v)=>{ if(settled) return; settled=true; clearTimeout(t); proc.stdout.removeListener('data',onD); proc.removeListener('exit',onX); resolve(v); };
+        const done=(v)=>{ if(settled) return; settled=true; clearTimeout(t); proc.stdout.removeListener('data',onD); proc.removeListener('exit',onX); proc.removeListener('error',onX); resolve(v); };
         const onD=()=>done(true), onX=()=>done(false); const t=setTimeout(()=>done(false), ms);
-        proc.stdout.once('data',onD); proc.once('exit',onX); });
+        proc.stdout.once('data',onD); proc.once('exit',onX); proc.once('error',onX); });
 
       async function onSegEnd(proc, sig){
-        if(current.token===myToken) current.ffExited=true;
-        if(finished || splicing) return;
+        if(current.token===myToken && current.ff===proc) current.ffExited=true;
+        if(finished) return;
+        if(splicing){ if(proc===ff) exitedDuringSplice={proc,sig}; return; }
         if(sig==='SIGKILL' && !wantSplice) return;                     // 我们主动拆的(seek/切集/客户端离开);停滞检测发起的 SIGKILL 例外,要续接
         wantSplice=false;
         if(res.writableEnded || req.destroyed){ finished=true; return; }
@@ -402,60 +428,98 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         }
         if(current.token!==myToken){ finished=true; return; }         // 已有更新的流接管(用户刚好在此刻换流):本路作废,绝不能再去 stop(会停掉新流的会话)
         splicing = true; current.splicing=true;                        // 续接期间 /api/streamstate 仍报 alive,前端别来抢流
+        bufPaused=false; probeStartedAt=0; needDataAt=Date.now();
         // 知道总时长就跳到最近的百分点(跳过的秒数少、续接快);不知道(老页面没传dur)就用同一个百分点跳过已播时长——同样正确,只是跳过得多一点
         const pct = durSec ? Math.max(0, Math.min(96, Math.floor(resumeAbs/durSec*100))) : vod.percent;
         const skip = durSec ? Math.max(0, resumeAbs - pct/100*durSec) : deliveredSec;
         console.log('['+label+'] 源断开于 '+resumeAbs.toFixed(0)+'s(本段供数 '+segLen.toFixed(0)+'s, 客户端缓冲 '+curBuf.toFixed(0)+'s) -> 无缝续接(从'+pct+'%跳过'+skip.toFixed(0)+'s)');
         const t0=Date.now();
         try{
-          let ok=false;
-          for(let attempt=1; attempt<=2 && !finished; attempt++){
-            if(current.token!==myToken){ finished=true; return; }     // 同上:换流了就作废
-            try{ if(script) await script.exports.stop(); }catch(e){}
-            await sleep(600);
-            await ensureReady();                       // 续接期间引擎可能已崩/被回收,先确保就绪(否则 script 为空直接抛错)
-            if(!script) throw new Error('引擎未就绪');
-            if(finished || res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
-            const r = await vod.mkPlay(pct);
-            if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
-            adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
-            if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
-            myPort = r.port;
-            const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec, !!(vod&&vod.transcode));
-            ff = cand;                                 // 立刻登记为当前段:客户端此刻离开时 teardown 才杀得到它
-            if(current.token===myToken){ current.ff = cand; current.port = r.port; current.ffExited=false; }
-            wire(cand);                                // 边等首字节边直接转发(不丢头);它若在 splicing 期间退出,onSegEnd 会直接返回,由这里的循环处理
-            ok = await waitFirstByte(cand, firstByteMs);
-            if(finished){ try{ cand.kill('SIGKILL'); }catch(e){} return; }   // 等首字节期间客户端走了
-            if(ok){ console.log('['+label+'] 续接成功 port '+r.port+',断开到出数据 '+((Date.now()-t0)/1000).toFixed(1)+'s'); break; }
-            console.log('['+label+'] 续接 port '+r.port+' '+(firstByteMs/1000)+'秒未出数据 '+attempt+'/2');
-            try{ cand.kill('SIGKILL'); }catch(e){}
+          let ok=false, failedPorts=0;
+          while(!ok && !finished){
+            if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
+            let failure=null;
+            try{
+              try{ if(script) await script.exports.stop(); }catch(e){}
+              await sleep(600);
+              await ensureReady();                     // 续接期间引擎可能已崩/被回收
+              if(!script) throw new Error('引擎未就绪');
+              if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
+              const r = await vod.mkPlay(pct);
+              if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
+              adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
+              if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
+              myPort = r.port;
+              // 新端口可能还在等 P2P 下载。同一原生会话重开一次 ffmpeg，避免无谓的 vodStop/vodStart。
+              for(let sub=1; sub<=2 && !finished; sub++){
+                const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec, !!(vod&&vod.transcode));
+                ff = cand;                             // 客户端离开时 teardown 能杀掉当前段
+                if(current.token===myToken){ current.ff=cand; current.port=r.port; current.ffExited=false; }
+                wire(cand);                            // 等首字节时直接转发，不丢 TS 头
+                ok = await waitFirstByte(cand, firstByteMs);
+                if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; try{cand.kill('SIGKILL');}catch(e){} return; }
+                if(ok){ console.log('['+label+'] 续接成功 port '+r.port+' 第'+sub+'次,断开到出数据 '+((Date.now()-t0)/1000).toFixed(1)+'s'); break; }
+                console.log('['+label+'] 续接 port '+r.port+' '+(firstByteMs/1000)+'秒未出数据,同端口第'+sub+'次');
+                try{ cand.stdout.unpipe(res); cand.kill('SIGKILL'); }catch(e){}
+                if(sub<2) await sleep(2500);
+              }
+            }catch(e){ failure=e; }
+            if(ok) break;
+            if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
+            failedPorts++;
+            // 客户端仍有内容可看时保持同一 HTTP 响应和 MSE 缓冲，不让前端重建播放器清空库存。
+            // 故障期间放慢重试；播放缓冲见底后才交给前端的整路恢复流程。
+            if(!(curPaused && Date.now()-curBufAt<10000) && curBuf<4) throw failure||new Error('续接多次无数据且客户端缓冲不足');
+            const delay=Math.min(30000,3000*Math.pow(2,Math.min(failedPorts,3)));
+            console.log('['+label+'] 续接未出数据'+(failure?('('+String(failure.message||failure).slice(0,80)+')'):'')+',剩余缓冲 '+curBuf.toFixed(0)+'s, '+(delay/1000)+'秒后重试');
+            await sleep(delay);
           }
           if(finished) return;
-          if(!ok) throw new Error('续接多次无数据');
         }catch(e){
           console.error('['+label+'] 续接失败:', e&&(e.message||e));
           finished=true; try{ res.end(); }catch(_){}   // 让前端按老路走恢复
         }finally{
           splicing=false; if(current.token===myToken) current.splicing=false;
+          const exited=exitedDuringSplice; exitedDuringSplice=null;
+          if(exited && !finished && current.token===myToken && exited.proc===ff) setImmediate(()=>onSegEnd(exited.proc,exited.sig));
         }
       }
 
       wire(ff);
 
-      // 点播深缓冲上限:前端上报 curBuf,>60秒暂停ffmpeg(背压)、<56秒续读 -> 缓冲稳定56-60秒
-      let bufPaused=false;
+      // 播放时留约100-120秒、暂停时留约160-180秒。源/端口恢复常耗数十秒，
+      // 旧的56-60秒缓冲在1.25倍速下不够撑过一次失败续接。
       const throttle = isLive ? null : setInterval(()=>{
         if(current.token!==myToken){ clearInterval(throttle); return; }
-        try{ const cur=ff; if(!bufPaused && curBuf>60){ cur.stdout.pause(); bufPaused=true; } else if(bufPaused && curBuf<56){ cur.stdout.resume(); bufPaused=false; } current.throttled=bufPaused; }catch(e){}
-        // 停滞检测:没被我们节流,却20秒没有任何新数据 -> 源哑了(ffmpeg会无限阻塞不自己退出),主动触发无缝续接
         try{
-          // 只有"客户端缓冲快见底了 还 20秒拿不到数据"才算真停滞。
-          // 客户端暂停/缓冲充足时数据本就不该流动(背压),不能当成源哑了——否则会在用户暂停期间
-          // 反复强行续接,把流反复重建、时间戳错乱(表现为画面卡住只剩声音)
-          if(curBuf < 10 && !bufPaused && !splicing && !finished && current.lastData && Date.now()-current.lastData>20000){
-            console.log('['+label+'] 客户端缓冲仅 '+curBuf.toFixed(0)+'s 且源 20 秒无数据 -> 主动续接');
-            wantSplice=true; try{ ff.kill('SIGKILL'); }catch(e){}   // onSegEnd 见到 wantSplice 才会对 SIGKILL 续接(之前漏了这个判断,这里的 kill 只是把流杀死、从不续接,日志每秒刷一行)
+          if(splicing || finished || wantSplice) return;
+          const now=Date.now(), paused=curPaused && now-curBufAt<10000;
+          const high=paused?180:120, low=paused?160:100;
+          // MSE 追加常落后于网络接收。只看 V.buffered 会在已发送数分钟数据后才背压；
+          // ffmpeg 的 out_time 是已产出的片长(不含 output_ts_offset)，可提前限制在途内容。
+          const ahead=bufferedAhead(now);
+          current.ahead=Math.round(ahead*10)/10;
+          if(probeStartedAt){
+            if(now-probeStartedAt>15000){
+              console.log('['+label+'] 节流探测15秒无数据,缓冲 '+curBuf.toFixed(0)+'s -> 提前续接');
+              probeStartedAt=0; wantSplice=true; ff.kill('SIGKILL');
+            }
+            return;
+          }
+          if(bufPaused){
+            if(ahead<low){ resumeSource(ff); needDataAt=now; }
+            else if(now>=nextProbeAt){
+              // 背压时无法仅凭 lastData 判断源健康：每30秒放行64KB；若15秒拿不到，趁客户端仍有缓冲就续接。
+              probeStartedAt=now; probeBytes=outBytes; needDataAt=now;
+              resumeSource(ff);
+            }
+          }else if(ahead>high){ pauseSource(ff); nextProbeAt=now+30000; }
+          current.throttled=bufPaused;
+          // 真正需要数据时20秒未出数就续接。暂停填库也检查；播放时在缓冲还有约90秒就检查。
+          if(!bufPaused && !probeStartedAt && (paused || curBuf<90) && current.lastData &&
+              now-Math.max(current.lastData,needDataAt)>20000){
+            console.log('['+label+'] '+(paused?'暂停期间':'播放期间')+'源20秒无数据,缓冲 '+curBuf.toFixed(0)+'s -> 提前续接');
+            wantSplice=true; ff.kill('SIGKILL');
           }
         }catch(e){}
       }, 1000);
@@ -486,8 +550,8 @@ app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:curren
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, curBuf, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着;恢复时前端据此判断要不要重连
-app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid) curBuf=Math.max(0,parseFloat(req.query.d)||0); res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
+app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid){ curBuf=Math.max(0,parseFloat(req.query.d)||0); curPaused=req.query.p==='1'; curPosAbs=Math.max(0,parseFloat(req.query.pos)||0); curBufAt=Date.now(); } res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——
 app.get('/api/loginstate', async (req,res)=>{
