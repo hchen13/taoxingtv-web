@@ -1,9 +1,29 @@
 import Java from 'frida-java-bridge';
 
+// 后台取流借用了 App 的 VodPlayActivity 作为原生回调对象。原版错误分支会
+// 弹 Toast 并调用 onBackPressed；这个 Activity 没有初始化播放器，二者都会
+// 让整个 App 崩溃。只拦截我们创建的实例，将通知交给服务端处理。
+Java.perform(() => {
+  try {
+    const Activity = Java.use('com.newvod.activity.VodPlayActivity');
+    const tell = Activity.tellMessage.overload('int');
+    tell.implementation = function (code) {
+      // player 为空是我们后台 $new() 的实例；真实播放页会初始化该字段。
+      if (VOD_CB && (this.equals(VOD_CB) || this.player.value === null)) {
+        send({ tell: code });
+        return;
+      }
+      return tell.call(this, code);
+    };
+    send({ vodCallbackGuard: true });
+  } catch (e) { send({ vodCallbackGuardError: String(e) }); }
+});
+
 // 直播仍使用内存 DEX 回调；点播必须使用 App 自己的 VodPlayActivity 回调。
 // Android 13 模拟器上，点播 P2P 到 endBlockID 时调用内存 DEX 回调会在
 // art::JNI::CallVoidMethodV 崩溃（两集 Silo 片尾均复现）。App 原生的
-// VodPlayActivity.tellMessage(2) 只设置 gotPlayOver，可安全处理片尾通知。
+// VodPlayActivity 的原生类可安全承接 JNI 回调；上面的 hook 再把后台实例
+// 的通知转给服务端，避免原版错误分支操作未初始化的界面播放器。
 // 两种回调都保留全局强引用，避免原生 P2P 线程稍后访问已回收的对象。
 const CB_DEX_B64 = 'ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA';
 let CB_INST = null, CB_NATIVE = null, CB_LOADER = null, CB_MODE = 'none', CB_FAIL = '';

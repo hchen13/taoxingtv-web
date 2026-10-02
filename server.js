@@ -199,6 +199,8 @@ async function attach(){
   // 捕获原生播放回调 tellMessage:i==2=真结束(片尾);其他为错误码
   script.message.connect(m=>{
     if(m.type==='error'){ console.error('[agent]',m.description); return; }
+    if(m.type==='send' && m.payload && m.payload.vodCallbackGuard) console.log('[agent] 后台点播回调防护已安装');
+    if(m.type==='send' && m.payload && m.payload.vodCallbackGuardError) console.error('[agent] 点播回调防护安装失败:',m.payload.vodCallbackGuardError);
     if(m.type==='send' && m.payload && typeof m.payload.tell==='number'){
       const t=m.payload.tell;
       if(t===2){ current.ended=true; console.log('[tell] 播放到结尾(tell=2)'); }
@@ -269,7 +271,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         const playStarted=Date.now();
         const r = await playFn();
-        if(isLive) console.log('['+label+'] 原生取流 '+(Date.now()-playStarted)+'ms port='+(r&&r.port)+' callback='+(r&&r.callback));
+        console.log('['+label+'] 原生取流 '+(Date.now()-playStarted)+'ms port='+(r&&r.port)+' callback='+(r&&r.callback));
         if(state!=='ready' || !script) throw new Error('取流引擎已断开，正在重新连接');
         if(aborted) break;
         if(!r || !r.port || r.port<=0){   // -1000 = 没挂表/没授权(hint_master_or_option_error),不是内容问题
@@ -305,7 +307,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         cand.stdout.removeListener('data', onFirst); cand.removeListener('exit', onCandExit);
         if(engineLost){ try{cand.kill('SIGKILL');}catch(e){} adb(['forward','--remove','tcp:'+port]); throw new Error('取流引擎崩溃，正在重新连接'); }
         if(gotData && !aborted){
-          if(isLive) console.log('['+label+'] 首包到达 总计 '+(Date.now()-requestedAt)+'ms,ffmpeg '+(Date.now()-playStarted)+'ms');
+          console.log('['+label+'] 首包到达 总计 '+(Date.now()-requestedAt)+'ms,本次取流 '+(Date.now()-playStarted)+'ms');
           cand.stdout.removeListener('data', collect);
           ff=cand; myPort=port; buffered=buf;
           if(sub>1) console.log('['+label+'] 同端口第'+sub+'次重开ffmpeg后出数据');
@@ -550,7 +552,7 @@ app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:curren
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, sid:current.sid, starting:!!current.starting, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
 app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid){ curBuf=Math.max(0,parseFloat(req.query.d)||0); curPaused=req.query.p==='1'; curPosAbs=Math.max(0,parseFloat(req.query.pos)||0); curBufAt=Date.now(); } res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——
