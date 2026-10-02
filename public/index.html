@@ -347,8 +347,8 @@ async function restore(){ const s=LS.get('txtv_state',null);
     if(!cats.length && Array.isArray(savedCats)) cats=savedCats;
     renderCats(); switchTab('vod',true); showRecent(); curFilm=s.vod.film; curEps=s.vod.eps||[]; curEpIdx=s.vod.idx||0; vodDur=s.vod.dur||0;
     if(curEps[curEpIdx]){ const savedPct=Number(s.vod.percent)||0, pct=Math.max(0,Math.min(96,Math.floor(savedPct||resumePctFor(curFilm.playid,curEpIdx))));
-      const target=vodDur?Math.min(vodDur-1,Math.max(0,savedPct/100*vodDur)):0, base=vodDur?Math.floor(pct/100*vodDur):0;
-      pendingResumeAt=target-base>3?target:0; pendingMargin=RESUME_MARGIN; pendingStartPaused=pauseOnce||!!s.vod.paused;
+      const target=vodDur?Math.max(0,savedPct/100*vodDur):0, base=vodDur?Math.floor(pct/100*vodDur):0;
+      pendingResumeAt=target-base>3?target:0; pendingMargin=resumeMargin(target); pendingStartPaused=pauseOnce||!!s.vod.paused;
       fromRecovery=true; try{ playEpisode(pct); }finally{ fromRecovery=false; } } }
   else if(s.live&&s.live.id){ switchTab('live'); playLive({channelId:s.live.id,link:s.live.link,name:s.live.name,index:s.live.index}); }
   else { switchTab(s.tab||'live'); }
@@ -754,12 +754,18 @@ function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTi
 // 否则用户在恢复退避期间拖进度会被旧的"最远位置"顶掉(比如先拖到远处又拖回近处,会被强行拉回远处)
 function userAction(){ if(fromRecovery) return; recoverTimes=0; lastRecover=0; pendingResumeAt=0; pendingStartPaused=false;
   if(recoverTimer){ clearTimeout(recoverTimer); recoverTimer=null; } recovering=false; }
+function playedToEnd(){ return !!vodDur && vodBase+V.currentTime>=vodDur-1.5; }
+function streamConfirmedEnded(st,sid){
+  // 标注片长可能短几十秒；必须播到服务端实际送达的片尾，才能切下一集。
+  return !!st && st.endedSid===sid && st.endedAt>0 && vodBase+V.currentTime>=st.endedAt-1.5;
+}
+function atBufferedEnd(){ for(let i=0;i<V.buffered.length;i++) if(V.buffered.end(i)>V.currentTime+0.15) return false; return true; }
+function resumeMargin(target){ return vodDur ? Math.min(RESUME_MARGIN,Math.max(0.5,vodDur-target-0.5)) : RESUME_MARGIN; }
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); STAGE.classList.add('ui'); if(player){try{player.destroy()}catch(e){}player=null;} } }
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
-  if(!isLiveNow && curFilm && vodDur && (vodBase+V.currentTime) >= vodDur*0.98){ atEnd(); return; }   // 到片尾=真结束,下一集;其余一律当故障重取续播
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
   recoverPos = isLiveNow?0:Math.max(pendingResumeAt||0, vodBase+V.currentTime);
   if(recoverTimes>14){   // 退避重试约2分钟仍不行才放弃(服务端遇到坏引擎会冷重启自愈,约需40-60秒,必须等得起)
@@ -773,7 +779,7 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
     if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
     else if(curFilm){ const pct=vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0;
       const newBase=vodDur?Math.floor(pct/100*vodDur):0;
-      pendingResumeAt = (pos-newBase>3) ? pos : 0; pendingMargin = RESUME_MARGIN;   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
+      pendingResumeAt = (pos-newBase>3) ? pos : 0; pendingMargin = resumeMargin(pos);   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
       playEpisode(pct); }
   }catch(e){} fromRecovery=false; recovering=false; }, (Date.now()-streamStartedAt<25000 ? 4000 : (recoverTimes<=2?600:0)) || Math.min(10000,600*Math.pow(2,recoverTimes-2)));
   // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
@@ -782,7 +788,7 @@ function fallbackToTranscode(){ const ep=curEps[curEpIdx]; if(!player||!ep||tran
   const pos=vodBase+V.currentTime, pct=vodDur?Math.min(96,Math.max(curPct,Math.floor(pos/vodDur*100))):curPct;
   const newBase=vodDur?Math.floor(pct/100*vodDur):0;
   transcodeFallback.add(ep.channelId); console.warn('媒体解码失败，改用转码',ep.channelId);
-  fromRecovery=true; try{ pendingResumeAt=pos-newBase>3?pos:0; pendingMargin=RESUME_MARGIN; playEpisode(pct); }finally{ fromRecovery=false; }
+  fromRecovery=true; try{ pendingResumeAt=pos-newBase>3?pos:0; pendingMargin=resumeMargin(pos); playEpisode(pct); }finally{ fromRecovery=false; }
   return true; }
 let failedMediaSid='', failedMediaChannel='', failedMediaAt=0, failedMediaCount=0;
 function onMediaFailure(detail){
@@ -798,30 +804,25 @@ function onMediaFailure(detail){
 }
 V.addEventListener('error', ()=>{ if(!isLiveNow && V.error && V.error.code===4 && fallbackToTranscode())return;
   if(!recovering && !switching) onMediaFailure('video error'); });   // 重复解码错误改走转码,并记录错误码以便区分源故障
-V.addEventListener('ended', ()=>{   // 真结束的干净信号:源送完->ffmpeg EOF->流正常结束->缓冲放完->ended在真片尾触发 => 下一集。
-                                    // (注:回调已换成App自己的VodPlayActivity实例以消除崩溃,tell==2不再回传JS,故不依赖它)
-                                    // 位置没到片尾就ended = 源中途EOF/故障 -> 从当前位置重取续播
+V.addEventListener('ended', async ()=>{   // 浏览器播完可能只是原生进程断了；服务端确认片尾后才切集。
   if(isLiveNow||!curFilm||!vodDur||recovering||switching) return;
-  if((vodBase+V.currentTime) >= vodDur*0.98) atEnd(); else doRecover(); });
+  const sid=activeStreamSid;
+  try{ const st=await jget('api/streamstate');
+    if(sid!==activeStreamSid||recovering||switching) return;
+    if(playedToEnd() && streamConfirmedEnded(st,sid)) atEnd(); else doRecover();
+  }catch(e){ if(sid===activeStreamSid) doRecover(); } });
 // 卡顿看门狗:进度冻结且无数据(readyState<3)约12秒 -> 查 streamstate 决定怎么办
 let wdLast=0, wdStall=0, checking=false;
 setInterval(async ()=>{
   if(!player||recovering){ wdStall=0; wdLast=V.currentTime; return; }
-  const absPos = vodBase + V.currentTime;
-  const nearEnd = curFilm && vodDur && absPos >= vodDur*0.98;   // 只有到98%才算"基本到头";90-98%的断流先重取续播(见doRecover),不再直接跳下一集
   if(pendingResumeAt){ wdStall=0; wdLast=V.currentTime; return; }   // 恢复等待中(故意暂停攒缓冲),由等待器负责
-  if(V.paused){   // 暂停:只在"停在缓冲末尾且近片尾+流已断"时判真结束(否则是用户主动暂停,不动)
-    const bufEnd = V.buffered.length ? V.buffered.end(V.buffered.length-1) : 0;
-    if(nearEnd && curFilm && V.currentTime>=bufEnd-1.0 && !checking){ checking=true;
-      try{ const st=await jget('api/streamstate'); if(!st.alive) atEnd(); }catch(e){} checking=false; }
-    wdStall=0; wdLast=V.currentTime; return;
-  }
+  if(V.paused){ wdStall=0; wdLast=V.currentTime; return; }   // 用户暂停时绝不自动跳集
   const frozen = Math.abs(V.currentTime-wdLast)<0.1; wdLast=V.currentTime;
   if(frozen && V.readyState<3){ wdStall++; } else { wdStall=0; }
   if(wdStall>=4 && !checking){ checking=true;
     try{ const st=await jget('api/streamstate');
-      if(st.ended && curFilm){ wdStall=0; atEnd(); }                 // 原生 tell==2(若触发)
-      else if(!st.alive){ wdStall=0; if(nearEnd && curFilm) atEnd(); else doRecover(); }   // 断流:近尾=放完(下一集/结束),中途=重取
+      if(streamConfirmedEnded(st,activeStreamSid) && playedToEnd() && atBufferedEnd()){ wdStall=0; atEnd(); }
+      else if(!st.alive){ wdStall=0; doRecover(); }   // 源断流不等于本集播完，片尾仍要先重取
       else if(wdStall>=8){ wdStall=0; doRecover(); }   // alive但播放中持续冻结~24s=源真卡住(点播已去掉ffmpeg读超时,改由此处检测)->从当前位置重取
       // else(alive且冻结<24s):临时卡顿,先等缓冲自愈,wdStall继续累加到8再重取
     }catch(e){} checking=false;
@@ -885,7 +886,7 @@ setInterval(()=>{
   // 跳转后P2P常常"先给一小段、再安静十几秒去找数据、然后才稳定供流"。
   // 余量小时仍要求源正在供数；余量已有30秒时即使服务端因缓冲已满而节流，也可安全开播。
   const flowing = resumeLastGrow && (now-resumeLastGrow < 2000);
-  if(ahead >= pendingMargin && (flowing || ahead>=30)){
+  if(ahead >= pendingMargin && (flowing || ahead>=30 || (vodDur && vodDur-pendingResumeAt<=RESUME_MARGIN+2))){
     const keepPaused=pendingStartPaused; pendingStartPaused=false; pendingResumeAt=0; $('load').classList.remove('show'); V.playbackRate=curSpeed;
     if(keepPaused){ V.pause(); saveState(); refreshDeferredCats(); } else V.play().catch(()=>{}); return;
   }
@@ -920,7 +921,10 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
   if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
   if(a < 6 && !V.paused && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;   // 暂停时不做见底判断(不消耗缓冲,也不该重取)
     try{ const st=await jget('api/streamstate');
-      if(!st.alive){ dryStart=0; doRecover(); }                       // 流真的死了(ffmpeg没了)->才重取
+      if(!st.alive){ dryStart=0;
+        if(playedToEnd() && streamConfirmedEnded(st,activeStreamSid) && atBufferedEnd()) atEnd();
+        else if(!(vodDur && vodDur-(vodBase+V.currentTime)<8 && a>0.3)) doRecover();   // 末尾仍有可播数据时先播完，避免重取吞掉最后几秒
+      }
       else if(!st.feeding){                                           // 源暂时没出数据:这在P2P很常见,原生就是转圈等
         if(!dryStart) dryStart=Date.now();
         else if(Date.now()-dryStart > 45000){ dryStart=0; doRecover(); }   // 持续45秒才重取:重取会让P2P从头爬坡,通常比继续等更糟

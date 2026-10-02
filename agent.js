@@ -1,5 +1,5 @@
 📦
-492413 /agent-src.js
+492634 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13663,12 +13663,16 @@ var require_agent_src = __commonJS({
         const Activity = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
         const tell = Activity.tellMessage.overload("int");
         tell.implementation = function(code3) {
-          if (VOD_CB && (this.equals(VOD_CB) || this.player.value === null)) {
-            send({ tell: code3 });
-            return;
-          }
-          return tell.call(this, code3);
+          send({ tell: code3 });
         };
+        try {
+          const errorUi = Activity["lambda$tellMessage$1$VodPlayActivity"].overload("java.lang.String");
+          errorUi.implementation = function(message) {
+            send({ vodCallbackWarning: String(message) });
+          };
+        } catch (e) {
+          send({ vodCallbackGuardError: "\u9519\u8BEF\u63D0\u793A\u9632\u62A4: " + String(e) });
+        }
         send({ vodCallbackGuard: true });
       } catch (e) {
         send({ vodCallbackGuardError: String(e) });

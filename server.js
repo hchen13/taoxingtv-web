@@ -95,6 +95,7 @@ async function cachedVod(key, ttlMs, load, staleMs=0){
 }
 // current: 当前活动流。token=递增唯一标识(不用端口,端口会复用);ended=收到tellMessage(2)真结束;ffExited=ffmpeg已退出
 let current={ token:0, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null };
+let endedVod={sid:'',at:0};  // 已确认结束的点播会话及实际送达片尾；App 退出后仍供页面按 sid 核对
 let curBuf=0, curPaused=false, curBufAt=0, curPosAbs=0;  // 当前播放会话的缓冲深度、暂停状态和播放位置
 let lastActivity=Date.now();
 let activeLogins=0;
@@ -193,7 +194,12 @@ async function attach(){
   for(let i=0;i<40;i++){ const apps=await dev.enumerateApplications(); app=apps.find(a=>a.identifier===PKG&&a.pid>0); if(app)break; await sleep(1000); }   // 崩溃冷重启后App启动可能>20s,放宽到40s避免"应用未就位"导致彻底断
   if(!app) throw new Error('应用未就位');
   session=await dev.attach(app.pid);
-  session.detached.connect((reason)=>{ cleanupCurrent(); script=null; session=null;
+  session.detached.connect((reason)=>{
+    // 片尾源先断、原生 App 随后崩溃时，onSegEnd 正在续接。保留 HTTP 响应和已缓冲的视频，
+    // 让续接流程冷启动引擎继续核对后续内容；直接 cleanup 会把断流伪装成已播完。
+    if(current.splicing && current.res && !current.res.writableEnded) console.log('[engine] 原生会话退出，保留点播续接与客户端缓冲');
+    else cleanupCurrent();
+    script=null; session=null;
     if(state==='ready'){ state='off'; needColdRestart=true; console.log('[engine] session dropped ('+reason+') -> off; 下次冷重启app修复P2P核心'); } });
   script=await session.createScript(fs.readFileSync(__dirname+'/agent.js','utf8'));
   // 捕获原生播放回调 tellMessage:i==2=真结束(片尾);其他为错误码
@@ -201,6 +207,7 @@ async function attach(){
     if(m.type==='error'){ console.error('[agent]',m.description); return; }
     if(m.type==='send' && m.payload && m.payload.vodCallbackGuard) console.log('[agent] 后台点播回调防护已安装');
     if(m.type==='send' && m.payload && m.payload.vodCallbackGuardError) console.error('[agent] 点播回调防护安装失败:',m.payload.vodCallbackGuardError);
+    if(m.type==='send' && m.payload && m.payload.vodCallbackWarning) console.log('[agent] 已忽略后台点播错误提示:',m.payload.vodCallbackWarning);
     if(m.type==='send' && m.payload && typeof m.payload.tell==='number'){
       const t=m.payload.tell;
       if(t===2){ current.ended=true; console.log('[tell] 播放到结尾(tell=2)'); }
@@ -423,7 +430,12 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         const resumeAbs = segStartAbs + deliveredSec;
         // 连续多次续接都几乎取不到内容 = 真到片尾(或源彻底没了),停止续接,否则会在片尾无限重连
         if(segLen < 2) emptySplices++; else emptySplices = 0;
-        if(isLive || !vod || !vod.mkPlay || emptySplices >= 3 || (durSec && resumeAbs >= durSec*0.985)){
+        // 片长只是目录估计值：此集实际供数到 3135s，标注却只有 3108s。
+        // 源已完整输出且超过标注片长 10 秒时，记录实际片尾给浏览器；其余断流仍续接。
+        const sourcePastCatalogEnd=!!durSec && resumeAbs>=durSec+10 && proc.exitCode===0 && !sig && segLen>=10;
+        const confirmedEnd=emptySplices>=3 || (current.token===myToken && current.ended) || sourcePastCatalogEnd;
+        if(isLive || !vod || !vod.mkPlay || confirmedEnd){
+          if(!isLive && current.token===myToken && confirmedEnd) endedVod={sid:mySid,at:resumeAbs};
           finished=true; try{ res.end(); }catch(e){}
           console.log('['+label+'] 结束于 '+resumeAbs.toFixed(0)+'s'+(durSec?('/'+durSec+'s'):'')+(emptySplices>=3?'(连续取不到内容)':''));
           return;
@@ -552,7 +564,7 @@ app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:curren
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, sid:current.sid, starting:!!current.starting, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, endedSid:endedVod.sid, endedAt:endedVod.at, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, sid:current.sid, starting:!!current.starting, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
 app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid){ curBuf=Math.max(0,parseFloat(req.query.d)||0); curPaused=req.query.p==='1'; curPosAbs=Math.max(0,parseFloat(req.query.pos)||0); curBufAt=Date.now(); } res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——

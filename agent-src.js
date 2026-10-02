@@ -2,19 +2,19 @@ import Java from 'frida-java-bridge';
 
 // 后台取流借用了 App 的 VodPlayActivity 作为原生回调对象。原版错误分支会
 // 弹 Toast 并调用 onBackPressed；这个 Activity 没有初始化播放器，二者都会
-// 让整个 App 崩溃。只拦截我们创建的实例，将通知交给服务端处理。
+// 让整个 App 崩溃。模拟器专供后台取流，所有该类的通知都交给服务端处理。
 Java.perform(() => {
   try {
     const Activity = Java.use('com.newvod.activity.VodPlayActivity');
     const tell = Activity.tellMessage.overload('int');
     tell.implementation = function (code) {
-      // player 为空是我们后台 $new() 的实例；真实播放页会初始化该字段。
-      if (VOD_CB && (this.equals(VOD_CB) || this.player.value === null)) {
-        send({ tell: code });
-        return;
-      }
-      return tell.call(this, code);
+      send({ tell: code });
     };
+    // 已排入 Activity 队列的原版错误 Runnable 也不能再操作未初始化的播放器。
+    try {
+      const errorUi = Activity['lambda$tellMessage$1$VodPlayActivity'].overload('java.lang.String');
+      errorUi.implementation = function (message) { send({ vodCallbackWarning: String(message) }); };
+    } catch (e) { send({ vodCallbackGuardError: '错误提示防护: ' + String(e) }); }
     send({ vodCallbackGuard: true });
   } catch (e) { send({ vodCallbackGuardError: String(e) }); }
 });
