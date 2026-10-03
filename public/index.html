@@ -360,8 +360,9 @@ function renderDownloads(){
       }catch(e){ $('downloadError').textContent=e.message||'操作失败'; action.disabled=false; } };
       buttons.appendChild(action);
     }
-    if(job.status==='cancelled'){
-      const remove=document.createElement('button'); remove.textContent='移除';
+    if(['cancelled','done'].includes(job.status)){
+      const remove=document.createElement('button'); remove.textContent=job.status==='done'?'移除记录':'移除';
+      if(job.status==='done') remove.title='只移除队列记录，不删除已下载文件';
       remove.onclick=async()=>{ remove.disabled=true; try{
         await jget('api/downloads/'+encodeURIComponent(job.id),{method:'DELETE'});
         $('downloadError').textContent=''; await refreshDownloads();

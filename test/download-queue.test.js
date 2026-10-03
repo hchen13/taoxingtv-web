@@ -202,3 +202,46 @@ test('取消后可从队列移除，其他排队任务保持原顺序', async ()
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('已删除的成品自动移除记录并允许重下，手动移除记录不删除文件', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'taoxing-done-record-test-'));
+  const output = path.join(temp, 'output');
+  fs.mkdirSync(output);
+  const opts = { root: path.join(temp, 'state'), port: 1, ffmpeg,
+    getActiveStream: () => ({ ff: {}, sid: 'browser-playback' }), log: { log() {}, error() {} } };
+  let queue = new DownloadQueue(opts);
+  try {
+    queue.setDirectory(output);
+    const episode = { channelId: 'D'.repeat(32), ip: '127.0.0.1', port: 12345,
+      duration: 60, playname: '第06集', sourceMode: 0 };
+    const kept = queue.enqueue({ playid: 'series', episodeIndex: 5, title: '剧集', episode });
+    kept.status = 'done'; kept.output = path.join(output, 'kept.mp4');
+    fs.writeFileSync(kept.output, 'keep');
+    queue.persist();
+    queue.remove(kept.id);
+    assert.ok(fs.existsSync(kept.output), '移除记录不能删除成品文件');
+
+    const deleted = queue.enqueue({ playid: 'series', episodeIndex: 5, title: '剧集', episode });
+    deleted.status = 'done'; deleted.output = path.join(output, 'deleted.mp4');
+    fs.writeFileSync(deleted.output, 'delete');
+    queue.persist();
+    fs.unlinkSync(deleted.output);
+    assert.ok(!queue.snapshot().jobs.some(j => j.id === deleted.id));
+    const again = queue.enqueue({ playid: 'series', episodeIndex: 5, title: '剧集', episode });
+    assert.notEqual(again.id, deleted.id, '删除文件后可以重新加入同一集');
+
+    const offline = queue.enqueue({ playid: 'series', episodeIndex: 7, title: '剧集', episode });
+    offline.status = 'done'; offline.output = path.join(temp, 'unmounted', 'offline.mp4');
+    const startup = queue.enqueue({ playid: 'series', episodeIndex: 6, title: '剧集', episode });
+    startup.status = 'done'; startup.output = path.join(output, 'startup.mp4');
+    queue.persist();
+    await queue.close();
+    queue = new DownloadQueue(opts);
+    assert.ok(!queue.jobs.some(j => j.id === startup.id), '服务启动时清理已删除文件的记录');
+    assert.ok(queue.jobs.some(j => j.id === offline.id), '保存目录暂时不可用时保留记录');
+    assert.ok(queue.jobs.some(j => j.id === again.id));
+  } finally {
+    await queue.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

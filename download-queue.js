@@ -66,6 +66,7 @@ class DownloadQueue {
         .map(j => ({ ...j, status: ['downloading', 'waiting'].includes(j.status) ? 'queued' : j.status,
           currentSec: 0, error: j.status === 'downloading' ? '服务已重启，继续下载' : j.error }));
     } catch (e) { if (e.code !== 'ENOENT') this.log.error('[downloads] 状态读取失败', e.message); }
+    this.reconcileMissingOutputs();
     this.persist();
   }
 
@@ -76,9 +77,24 @@ class DownloadQueue {
   }
 
   snapshot() {
+    this.reconcileMissingOutputs();
     return { directory: this.directory, jobs: this.jobs.map(j => ({ ...j,
       speedBps: this.active?.job === j && j.status === 'downloading' ? this.active.rate.bps : null,
       partial: !['done', 'cancelled'].includes(j.status) && fs.existsSync(this.previewPath(j)) ? this.previewPath(j) : null })) };
+  }
+
+  reconcileMissingOutputs() {
+    const before = this.jobs.length;
+    this.jobs = this.jobs.filter(job => {
+      if (job.status !== 'done') return true;
+      if (!job.output) return false;
+      try { return fs.statSync(job.output).isFile(); }
+      catch (e) {
+        // 目录暂时不可用时保留记录；只有确定文件被删才移除。
+        return e.code !== 'ENOENT' || !fs.existsSync(path.dirname(job.output));
+      }
+    });
+    if (this.jobs.length !== before) this.persist();
   }
 
   previewPath(job) {
@@ -102,6 +118,7 @@ class DownloadQueue {
         !/^[A-Za-z0-9.:-]{3,255}$/.test(episode.ip) ||
         !Number.isInteger(episode.port) || episode.port < 1 || episode.port > 65535 ||
         !Number.isFinite(episode.duration) || episode.duration < 30) throw new Error('选集资源无效');
+    this.reconcileMissingOutputs();
     const existing = this.jobs.find(j => j.playid === playid && j.episodeIndex === episodeIndex &&
       !['cancelled', 'failed'].includes(j.status));
     if (existing) return existing;
@@ -156,8 +173,9 @@ class DownloadQueue {
     const index = this.jobs.findIndex(j => j.id === id);
     if (index < 0) throw new Error('任务不存在');
     const job = this.jobs[index];
-    if (job.status !== 'cancelled') throw new Error('只能移除已取消的任务');
+    if (!['cancelled', 'done'].includes(job.status)) throw new Error('只能移除已取消或已完成的任务');
     if (this.active?.job.id === id) throw new Error('正在结束下载，请稍后移除');
+    // 已完成任务只清理队列元数据和临时片段，绝不删除成品文件。
     fs.rmSync(path.join(this.jobsDir, id), { recursive: true, force: true });
     fs.rmSync(this.previewPath(job), { force: true });
     this.jobs.splice(index, 1);
