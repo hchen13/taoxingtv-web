@@ -251,7 +251,7 @@
       </div>
       <div class="downloadPanel" id="downloadPanel"><button class="close" onclick="closeDownloads()">✕</button>
         <div class="downloadHead"><h2>下载队列</h2><span class="downloadSpeedSummary" id="downloadSpeedSummary"></span></div>
-        <p class="note">依次下载淘星点播源。速度按最近约 8 秒写入文件的字节数计算；完成校验后文件才会出现在保存目录。播放占用取流时，任务会等待。</p>
+        <p class="note">依次下载淘星点播源。速度按最近约 8 秒写入文件的字节数计算。下载中目标目录会出现可播放的 .partial.ts，完成后生成 MP4。播放占用取流时，任务会等待。</p>
         <div class="downloadActions"><button id="stopForDownloads" style="display:none" onclick="stopPlaybackForDownloads()">停止播放并开始下载</button><button id="resumeAfterDownloads" style="display:none" onclick="resumeStoppedPlayback()">继续观看</button></div>
         <div class="downloadDir"><label for="downloadDirectory">保存目录</label><input id="downloadDirectory" spellcheck="false" placeholder="例如 ~/Downloads"><button onclick="saveDownloadDirectory()">保存目录</button></div>
         <div class="downloadError" id="downloadError"></div><div id="downloadJobs"></div>
@@ -345,6 +345,7 @@ function renderDownloads(){
     const detail=document.createElement('div'); detail.className='detailLine';
     if(job.status==='done') detail.textContent=job.output||'文件已保存';
     else if(job.status==='failed') detail.textContent=job.error||'请重试';
+    else if(job.partial) detail.textContent='边下边看 · '+job.partial;
     else if(confirmingEnd) detail.textContent='正在确认片尾';
     else if(job.status==='waiting') detail.textContent='停止播放后自动继续';
     else if(job.status==='queued') detail.textContent='等待前面的任务完成';

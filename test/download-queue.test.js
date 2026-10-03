@@ -84,6 +84,7 @@ test('播放优先、按加入顺序下载，断流后续取并生成可解码 M
     assert.ok(requests.lastIndexOf('A'.repeat(32)) < requests.indexOf('B'.repeat(32)), '第二集在第一集完成后才开始');
     for (const job of [first, second]) {
       assert.ok(fs.existsSync(job.output));
+      assert.ok(!fs.existsSync(queue.previewPath(job)), '正式 MP4 完成后清理预览文件');
       const info = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries',
         'format=duration:stream=codec_type', '-of', 'json', job.output], { encoding: 'utf8' }));
       assert.ok(Number(info.format.duration) >= 30);
@@ -142,17 +143,31 @@ test('服务正常退出会保存当前片段，重启后从该进度续取', { 
       episode: { channelId: 'C'.repeat(32), ip: '127.0.0.1', port: 12345,
         duration: 32, playname: '第01集', sourceMode: 1 } });
     await until(() => job.currentSec >= 10);
+    const preview = queue.previewPath(job);
+    await until(() => fs.existsSync(preview) && fs.statSync(preview).size > 10000);
+    const partialInfo = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries',
+      'format=duration:stream=codec_type', '-of', 'json', preview], { encoding: 'utf8' }));
+    assert.ok(Number(partialInfo.format.duration) >= 5, '下载过程中 partial 已可读取');
+    assert.ok(partialInfo.streams.some(s => s.codec_type === 'video'));
+    const partialDecoded = spawnSync(ffmpeg, ['-v', 'error', '-i', preview, '-t', '1', '-f', 'null', '-'],
+      { timeout: 15000, encoding: 'utf8' });
+    assert.equal(partialDecoded.status, 0, partialDecoded.stderr);
     await queue.close();
     assert.equal(job.status, 'queued');
     assert.ok(job.completedSec >= 10);
     assert.ok(job.segments.length >= 1);
+    assert.ok(fs.existsSync(preview), '服务重启时 partial 留在目标目录');
+    fs.unlinkSync(preview);
     queue = new DownloadQueue(opts);
     const restored = queue.jobs[0];
     assert.equal(restored.status, 'queued');
     assert.ok(restored.completedSec >= 10);
+    queue.recoverSegments(restored);
+    assert.ok(fs.existsSync(preview), '可由已保存片段重建丢失的预览文件');
     void queue.tick();
     await until(() => restored.status === 'done');
     assert.ok(requests >= 2);
+    assert.ok(!fs.existsSync(preview));
     const decoded = spawnSync(ffmpeg, ['-v', 'error', '-i', restored.output, '-f', 'null', '-'],
       { timeout: 15000, encoding: 'utf8' });
     assert.equal(decoded.status, 0, decoded.stderr);

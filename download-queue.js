@@ -77,7 +77,12 @@ class DownloadQueue {
 
   snapshot() {
     return { directory: this.directory, jobs: this.jobs.map(j => ({ ...j,
-      speedBps: this.active?.job === j && j.status === 'downloading' ? this.active.rate.bps : null })) };
+      speedBps: this.active?.job === j && j.status === 'downloading' ? this.active.rate.bps : null,
+      partial: !['done', 'cancelled'].includes(j.status) && fs.existsSync(this.previewPath(j)) ? this.previewPath(j) : null })) };
+  }
+
+  previewPath(job) {
+    return path.join(job.directory, `${path.parse(job.filename).name}.${job.id.slice(0, 8)}.partial.ts`);
   }
 
   setDirectory(input) {
@@ -128,7 +133,10 @@ class DownloadQueue {
       setTimeout(() => { if (this.active?.proc === proc) proc.kill('SIGINT'); }, 5000).unref();
       setTimeout(() => { if (this.active?.proc === proc) proc.kill('SIGKILL'); }, 12000).unref();
     }
-    else fs.rmSync(path.join(this.jobsDir, id), { recursive: true, force: true });
+    else {
+      fs.rmSync(path.join(this.jobsDir, id), { recursive: true, force: true });
+      fs.rmSync(this.previewPath(job), { force: true });
+    }
     if (!this.active || this.active.job.id !== id) { job.segments = []; job.completedSec = 0; job.currentSec = 0; }
     this.persist();
     return job;
@@ -151,6 +159,7 @@ class DownloadQueue {
     if (job.status !== 'cancelled') throw new Error('只能移除已取消的任务');
     if (this.active?.job.id === id) throw new Error('正在结束下载，请稍后移除');
     fs.rmSync(path.join(this.jobsDir, id), { recursive: true, force: true });
+    fs.rmSync(this.previewPath(job), { force: true });
     this.jobs.splice(index, 1);
     this.persist();
     return job;
@@ -209,7 +218,32 @@ class DownloadQueue {
     }
     job.segments = good;
     job.completedSec = good.reduce((sum, s) => sum + s.duration, 0);
+    this.recoverPreview(job, dir);
     return dir;
+  }
+
+  recoverPreview(job, dir) {
+    const preview = this.previewPath(job);
+    if (!job.segments.length) {
+      fs.rmSync(preview, { force: true });
+      return;
+    }
+    const actual = fs.existsSync(preview) ? this.probe(preview) : 0;
+    if (Math.abs(actual - job.completedSec) < 3) return;
+    const files = job.segments.map(s => path.join(dir, s.file));
+    const list = path.join(dir, 'preview-concat.txt');
+    fs.writeFileSync(list, files.map(file => `file '${file.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
+    const tmp = preview + '.tmp';
+    try {
+      execFileSync(this.ffmpeg, ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y',
+        '-f', 'concat', '-safe', '0', '-i', list, '-map', '0:v:0', '-map', '0:a?',
+        '-c', 'copy', '-f', 'mpegts', tmp], { timeout: 180000, maxBuffer: 1024 * 1024 });
+      if (this.probe(tmp) < job.completedSec - 3) throw new Error('重建的预览文件不完整');
+      fs.renameSync(tmp, preview);
+    } catch (e) {
+      fs.rmSync(tmp, { force: true });
+      throw new Error('恢复下载预览失败：' + String(e.message || e));
+    }
   }
 
   uniqueOutput(job) {
@@ -231,6 +265,7 @@ class DownloadQueue {
       const result = await this.capture(job, dir);
       if (job.status === 'cancelled') {
         fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(this.previewPath(job), { force: true });
         job.segments = []; job.completedSec = 0; job.currentSec = 0; this.persist();
         return;
       }
@@ -251,7 +286,7 @@ class DownloadQueue {
   }
 
   capture(job, dir) {
-    return new Promise(resolve => {
+    return new Promise((resolve, reject) => {
       const n = job.segments.length;
       const file = `segment-${n}.mp4`;
       const output = path.join(dir, file);
@@ -263,12 +298,29 @@ class DownloadQueue {
         ip: job.episode.ip, port: String(job.episode.port), percent: String(percent),
         dur: String(duration), mode: String(job.episode.sourceMode), sid });
       const url = `http://127.0.0.1:${this.port}/vod-stream?${params}`;
+      const seek = skip > 0.1 ? ['-ss', skip.toFixed(3)] : [];
       const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', '-progress', 'pipe:1',
         '-stats_period', '2', '-y', '-fflags', '+discardcorrupt+genpts', '-err_detect', 'ignore_err', '-i', url,
-        ...(skip > 0.1 ? ['-ss', skip.toFixed(3)] : []),
+        ...seek,
         '-map', '0:v:0', '-map', '0:a?', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k',
-        '-movflags', '+faststart', output];
-      const proc = spawn(this.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        '-movflags', '+faststart', output,
+        // 同一输入再写一份可边下边看的 TS；断流后按已存时长续接时间戳。
+        ...seek, '-map', '0:v:0', '-map', '0:a?', '-c:v', 'copy', '-c:a', 'copy',
+        ...(job.completedSec > 0.05 ? ['-output_ts_offset', job.completedSec.toFixed(3)] : []),
+        '-flush_packets', '1', '-f', 'mpegts', '-muxdelay', '0', '-muxpreload', '0', 'pipe:3'];
+      const proc = spawn(this.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+      const preview = fs.createWriteStream(this.previewPath(job), { flags: 'a' });
+      let previewError = null;
+      const previewDone = new Promise(done => {
+        preview.once('finish', done);
+        preview.once('error', e => {
+          previewError = e;
+          proc.stdio[3].destroy();
+          proc.kill('SIGINT');
+          done();
+        });
+      });
+      proc.stdio[3].pipe(preview);
       this.active = { job, proc, sid, rate: new FileWriteRate(output) };
       let lastMedia = 0, lastGrow = Date.now(), lastPersist = 0, warned = '', progressText = '';
       proc.stdout.on('data', chunk => {
@@ -276,7 +328,8 @@ class DownloadQueue {
         progressText = lines.pop().slice(-200);
         for (const line of lines) {
           if (!line.startsWith('out_time_us=')) continue;
-          const sec = Number(line.slice(12)) / 1e6;
+          // 第二个输出的进度含 output_ts_offset；队列只记录本次捕获的时长。
+          const sec = Math.max(0, Number(line.slice(12)) / 1e6 - job.completedSec);
           if (sec > lastMedia + 0.2) { lastMedia = sec; lastGrow = Date.now(); job.currentSec = sec; }
         }
         if (Date.now() - lastPersist > 5000) { lastPersist = Date.now(); this.persist(); }
@@ -294,11 +347,14 @@ class DownloadQueue {
         }
       }, 2000);
       let settled = false;
-      const done = () => {
+      const done = async () => {
         if (settled) return;
         settled = true;
         clearInterval(monitor);
         if (this.active?.proc === proc) this.active = null;
+        if (!preview.writableEnded) preview.end();
+        await previewDone;
+        if (previewError) return reject(new Error('下载预览写入失败：' + previewError.message));
         const seconds = fs.existsSync(output) ? this.probe(output) : 0;
         if (warned && seconds < 2) this.log.error('[downloads] ffmpeg:', warned.slice(-300));
         resolve({ file, duration: seconds });
@@ -328,6 +384,7 @@ class DownloadQueue {
       throw new Error(`文件只有 ${actual.toFixed(0)} 秒，片长应为 ${job.episode.duration} 秒`);
     }
     fs.renameSync(tmp, output);
+    fs.rmSync(this.previewPath(job), { force: true });
     job.status = 'done'; job.completedSec = actual; job.currentSec = 0;
     job.output = output; job.error = ''; job.finishedAt = Date.now();
     this.persist();
