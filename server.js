@@ -8,6 +8,7 @@ const { execFileSync, spawn } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const { pinyin } = require('pinyin-pro');
 const { DownloadQueue } = require('./download-queue');
+const { DeadPortRestartPolicy } = require('./stream-recovery');
 // 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
 { const _l=console.log.bind(console), _e=console.error.bind(console);
   const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
@@ -121,11 +122,11 @@ function cleanupCurrent(){
   current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
 }
 
-let needColdRestart=false, coldLaunchAt=0, coldStreamStarted=false, startupDeadPortFailures=0;
+let needColdRestart=false, coldLaunchAt=0, coldStreamStarted=false;
+const deadPortRestartPolicy=new DeadPortRestartPolicy();
 function startupWarmup(){ return !!coldLaunchAt && !coldStreamStarted && Date.now()-coldLaunchAt<90000; }
-function shouldRestartAfterDeadPort(count){
-  if(startupWarmup() && (startupDeadPortFailures+=count)===1) return false;
-  return true;
+function shouldRestartAfterDeadPort(count, nearEndVod){
+  return deadPortRestartPolicy.shouldRestart(count,{nearEnd:nearEndVod,startupWarmup:startupWarmup()});
 }
 async function bootEmulator(){
   if(state==='ready' && script && emulatorRunning()) return;
@@ -145,7 +146,7 @@ async function bootEmulator(){
         adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']);
         // 部分模拟器上 monkey 找不到 Leanback 入口并以 -5 退出；显式启动 APK 的登录入口。
         if(!appRunning()) adb(['shell','am','start','-n',PKG+'/.activity.LoginActivity']);
-        coldLaunch=true; coldLaunchAt=Date.now(); coldStreamStarted=false; startupDeadPortFailures=0;
+        coldLaunch=true; coldLaunchAt=Date.now(); coldStreamStarted=false;
       }
       for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
       if(coldLaunch){ bootStep='等待应用启动…'; await sleep(1500); }
@@ -339,20 +340,20 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
         // 前端等不及先走了,但本次确实遇到过死端口=引擎已坏。必须在这里也自愈,否则前端反复重试、
         // 每次都走abort分支跳过自愈 -> 引擎一直毒着 -> 用户看到"播放中断"。正常seek不会有死端口,不会误触发
-        if(deadPortCount>0 && state==='ready' && !nearEndVod){
-          if(shouldRestartAfterDeadPort(deadPortCount)){
+        if(deadPortCount>0 && state==='ready'){
+          if(shouldRestartAfterDeadPort(deadPortCount, nearEndVod)){
             console.log('['+label+'] 客户端已放弃且死端口持续出现 -> 冷重启App自愈');
             needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
-          } else console.log('['+label+'] 冷启动首个死端口，保留正在初始化的App供下次重试');
+          } else console.log('['+label+'] 坏端口未达到自愈门限或处于重启冷却期');
         }
         return;
       }
       if(!ff){   // 多次重取都失败,放弃(前端会收到502后自行再试)
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
         let restarting=false;
-        if(state==='ready' && !nearEndVod){
-          if(deadPortCount>0 && !shouldRestartAfterDeadPort(deadPortCount)){
-            console.log('['+label+'] 冷启动首个死端口，等待App完成初始化后重试');
+        if(state==='ready'){
+          if(deadPortCount>0 && !shouldRestartAfterDeadPort(deadPortCount, nearEndVod)){
+            console.log('['+label+'] 坏端口未达到自愈门限或处于重启冷却期');
           } else {
             console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
             restarting=true;
@@ -364,6 +365,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       }
 
       current={ token:myToken, chid:label, port:myPort, ff, res, ended:false, ffExited:false, starting:false, sid:mySid };
+      deadPortRestartPolicy.succeeded();
       coldStreamStarted=true;
       curBuf=0; curPaused=false; curBufAt=0; curPosAbs=0;
       current.lastData=Date.now();  // 首字节健康门限已收到数据；即使后续立刻静默也能计时检测
