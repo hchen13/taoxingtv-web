@@ -9,6 +9,7 @@ const { XMLParser } = require('fast-xml-parser');
 const { pinyin } = require('pinyin-pro');
 const { DownloadQueue } = require('./download-queue');
 const { DeadPortRestartPolicy } = require('./stream-recovery');
+const { buildTranscodeArgs } = require('./stream-transcode');
 // 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
 { const _l=console.log.bind(console), _e=console.error.bind(console);
   const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
@@ -33,32 +34,11 @@ function readDevFile(dev){
   } catch(e){ return null; }
 }
 // 直播继续硬件转码；点播原片可浏览器解码时只转封装，保留低开销与原生供数速度。
-function spawnTranscode(srcPort, isLive, nearEnd, skipSec, tsOffsetSec, transcodeVod=false, copyLive=false){
+function spawnTranscode(srcPort, isLive, skipSec, tsOffsetSec, transcodeVod=false, copyLive=false){
   // 直播:开 ffmpeg 底层重连,扛 P2P 抖动。
   // 点播:不开重连。点播源的 HTTP 连接只在两种情况下结束:内容真到结尾,或它的 P2P 会话被 vodStop 掉。
   // 连接断了由 serveStream 的 onSegEnd 负地续接(重新 vodStart + -ss 跳过重叠),ffmpeg 自己不重连。
-  const rec = isLive ? ['-reconnect','1','-reconnect_streamed','1','-reconnect_on_network_error','1','-reconnect_delay_max','4'] : [];
-  // 直播按实时读并允许追赶；点播由客户端缓冲深度控制背压，不额外限制读速。
-  // 本机实测旧点播原始 TS 在 20 秒供数 37 MB，旧硬件重编码同时间仅输出 0.5 MB。
-  const rate = isLive ? ['-readrate','1.0','-readrate_catchup','4.0','-readrate_initial_burst','15']
-                      : [];
-  // 仅在浏览器不支持原片编码时使用已有的低码率硬件转码兜底。
-  const venc = isLive
-    ? copyLive ? ['-c:v','copy'] : ['-c:v','h264_videotoolbox','-realtime','1','-b:v','8M','-g','60','-pix_fmt','yuv420p']
-    : transcodeVod ? ['-c:v','h264_videotoolbox','-q:v','50','-maxrate','1500k','-bufsize','3M','-g','60','-pix_fmt','yuv420p']
-                   : ['-c:v','copy'];
-  const aenc=(!isLive&&!transcodeVod) ? ['-c:a','copy'] : ['-c:a','aac','-b:a','160k','-ac','2'];
-  const rwto = isLive ? ['-rw_timeout','30000000'] : [];   // 点播:根本不设读超时。ffmpeg只要连接(页面)还开着就一直活,暂停多久都不自杀;页面关/掉线→res close→teardown回收(见serveStream);真卡死(源挂/App崩)由前端看门狗冻结~24s重取兜底。直播保留30s,与-reconnect配套扛P2P抖动
-  const seek = (skipSec>0.05) ? ['-ss', skipSec.toFixed(3)] : [];             // 续接时跳过与上一段重叠的部分,避免重复内容
-  const tsoff = (tsOffsetSec>0.05) ? ['-output_ts_offset', tsOffsetSec.toFixed(3)] : [];  // 让新一段的时间戳接着上一段走,客户端看到的是一条连续的流
-  const prog = isLive ? [] : ['-progress','pipe:2'];                          // 上报已输出时长,续接时据此算出续接点
-  const args=['-hide_banner','-loglevel','error', ...prog, ...rec, ...rwto,
-    '-fflags','+discardcorrupt+genpts','-err_detect','ignore_err',
-    ...rate,
-    ...seek, '-i','http://127.0.0.1:'+srcPort+'/',
-    ...venc,
-    ...aenc,
-    ...tsoff, '-f','mpegts','-muxdelay','0','-muxpreload','0','pipe:1'];
+  const args=buildTranscodeArgs('http://127.0.0.1:'+srcPort+'/',isLive,skipSec,tsOffsetSec,transcodeVod,copyLive);
   const ff=spawn(FFMPEG,args,{stdio:['ignore','pipe','pipe']});
   let errbuf='';
   ff.stderr.on('data',d=>{ errbuf=(errbuf+d.toString()).slice(-1000); });
@@ -300,7 +280,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
         // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
         for(let sub=1; sub<=3 && !aborted; sub++){
-        cand=spawnTranscode(port, isLive, nearEndVod, 0, 0, !!(vod&&vod.transcode), !!(vod&&vod.copyLive));
+        cand=spawnTranscode(port, isLive, 0, 0, !!(vod&&vod.transcode), !!(vod&&vod.copyLive));
         // 健康门限:等首字节。出数据=活端口;超时/即时退出=死端口,清理后重取
         const buf=[]; const collect=(d)=>buf.push(d); let onFirst, onCandExit, timer, watch;
         gotData = await new Promise(resolve=>{
@@ -469,7 +449,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
               myPort = r.port;
               // 新端口可能还在等 P2P 下载。同一原生会话重开一次 ffmpeg，避免无谓的 vodStop/vodStart。
               for(let sub=1; sub<=2 && !finished; sub++){
-                const cand = spawnTranscode(r.port, isLive, nearEndVod, skip, deliveredSec, !!(vod&&vod.transcode));
+                const cand = spawnTranscode(r.port, isLive, skip, deliveredSec, !!(vod&&vod.transcode));
                 ff = cand;                             // 客户端离开时 teardown 能杀掉当前段
                 if(current.token===myToken){ current.ff=cand; current.port=r.port; current.ffExited=false; }
                 wire(cand);                            // 等首字节时直接转发，不丢 TS 头

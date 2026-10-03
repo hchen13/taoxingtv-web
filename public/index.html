@@ -310,8 +310,10 @@ function renderDownloads(){
     const body=document.createElement('div'); body.className='body';
     const name=document.createElement('div'); name.className='name'; name.textContent=job.title+' · '+job.playname;
     const status=document.createElement('div'); status.className='status';
-    const progress=Math.min(100,Math.round(100*((job.completedSec||0)+(job.currentSec||0))/(job.episode?.duration||1)));
-    status.textContent=(downloadLabels[job.status]||job.status)+(job.status==='done'?' · '+job.output:job.status==='failed'?' · '+(job.error||'请重试'):' · '+progress+'%');
+    const received=(job.completedSec||0)+(job.currentSec||0), duration=job.episode?.duration||1;
+    const progress=job.status==='done'?100:Math.min(99,Math.round(100*received/duration));
+    const confirmingEnd=job.status==='downloading' && received>=duration;
+    status.textContent=(downloadLabels[job.status]||job.status)+(job.status==='done'?' · '+job.output:job.status==='failed'?' · '+(job.error||'请重试'):confirmingEnd?' · 99% · 正在确认片尾':' · '+progress+'%');
     body.append(name,status);
     if(['downloading','queued','waiting'].includes(job.status)){
       const bar=document.createElement('progress'); bar.max=100; bar.value=progress; body.appendChild(bar);
