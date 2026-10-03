@@ -110,7 +110,10 @@
   .detail .downloadOpen{position:absolute;top:22px;right:68px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);padding:7px 11px;cursor:pointer;z-index:9}
   .downloadPanel{position:absolute;inset:0;background:rgba(13,15,20,.98);z-index:11;display:none;padding:28px 34px;overflow-y:auto}
   .downloadPanel.show{display:block}
-  .downloadPanel h2{font-size:25px;margin-bottom:10px}
+  .downloadHead{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding-right:36px;margin-bottom:10px}
+  .downloadPanel h2{font-size:25px}
+  .downloadSpeedSummary{color:var(--dim);font-size:13px;font-variant-numeric:tabular-nums}
+  .downloadSpeedSummary.active{color:#a8d2ff}
   .downloadPanel .close{position:absolute;top:18px;right:22px;background:none;border:none;color:var(--dim);font-size:26px;cursor:pointer}
   .downloadPanel .note{color:var(--dim);margin-bottom:16px}
   .downloadActions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
@@ -121,11 +124,16 @@
   .downloadDir button,.downloadJob button{padding:8px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);cursor:pointer}
   .downloadDir button:hover,.downloadJob button:hover{border-color:var(--acc)}
   .downloadError{min-height:20px;color:#ff8686;margin-bottom:8px}
-  .downloadJob{padding:13px 0;border-top:1px solid var(--line);display:flex;align-items:center;gap:14px}
-  .downloadJob .body{flex:1;min-width:0}
-  .downloadJob .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .downloadJob .status{color:var(--dim);font-size:12px;margin-top:3px;overflow-wrap:anywhere}
-  .downloadJob progress{width:100%;height:5px;accent-color:var(--acc);margin-top:6px}
+  #downloadJobs{display:flex;flex-wrap:wrap;gap:12px;align-content:flex-start}
+  .downloadJob{width:min(100%,320px);min-width:0;padding:13px;border:1px solid var(--line);border-radius:10px;background:var(--panel);display:flex;flex-direction:column;gap:8px}
+  .downloadJob .head{display:flex;align-items:baseline;gap:8px;min-width:0}
+  .downloadJob .name{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .downloadJob .state{color:var(--dim);font-size:12px;white-space:nowrap}
+  .downloadJob .metrics{display:flex;justify-content:space-between;gap:10px;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+  .downloadJob .metrics strong{color:var(--txt);font-weight:600}
+  .downloadJob .detailLine{color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .downloadJob progress{width:100%;height:5px;accent-color:var(--acc)}
+  .downloadJob .buttons{display:flex;gap:8px;margin-top:auto}
   #wake{position:fixed;inset:0;z-index:99;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
   #wake.hide{display:none}
   #wake .logo2{font-size:34px;font-weight:800}#wake .step{color:var(--dim);font-size:14px}
@@ -242,7 +250,8 @@
         <div class="epstitle">选集播放</div><div class="eps" id="dEps"></div>
       </div>
       <div class="downloadPanel" id="downloadPanel"><button class="close" onclick="closeDownloads()">✕</button>
-        <h2>下载队列</h2><p class="note">依次下载淘星点播源。下载中先写入项目临时目录，完成校验后才会出现在所选保存目录。播放占用取流时，下载会等待。</p>
+        <div class="downloadHead"><h2>下载队列</h2><span class="downloadSpeedSummary" id="downloadSpeedSummary"></span></div>
+        <p class="note">依次下载淘星点播源。速度按最近约 8 秒写入文件的字节数计算；完成校验后文件才会出现在保存目录。播放占用取流时，任务会等待。</p>
         <div class="downloadActions"><button id="stopForDownloads" style="display:none" onclick="stopPlaybackForDownloads()">停止播放并开始下载</button><button id="resumeAfterDownloads" style="display:none" onclick="resumeStoppedPlayback()">继续观看</button></div>
         <div class="downloadDir"><label for="downloadDirectory">保存目录</label><input id="downloadDirectory" spellcheck="false" placeholder="例如 ~/Downloads"><button onclick="saveDownloadDirectory()">保存目录</button></div>
         <div class="downloadError" id="downloadError"></div><div id="downloadJobs"></div>
@@ -282,6 +291,12 @@ const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e)
 let downloadState={directory:'',jobs:[]};
 let playbackStoppedForDownload=false;
 const downloadLabels={queued:'排队中',waiting:'等待停止播放',downloading:'下载中',done:'已完成',failed:'失败',cancelled:'已取消'};
+function formatDownloadRate(bps){
+  if(!Number.isFinite(bps)) return '测速中…';
+  if(bps<1024) return bps===0?'0 KiB/s':Math.round(bps)+' B/s';
+  if(bps<1048576) return Math.round(bps/1024)+' KiB/s';
+  return (bps/1048576).toFixed(2)+' MiB/s';
+}
 async function refreshDownloads(){
   try{ downloadState=await jget('api/downloads'); renderDownloads(); }
   catch(e){ if($('downloadPanel').classList.contains('show')) $('downloadError').textContent=e.message||'队列加载失败'; }
@@ -296,36 +311,53 @@ function syncEpisodeDownloadButtons(){
 }
 function renderDownloads(){
   const pending=downloadState.jobs.filter(j=>['queued','waiting','downloading'].includes(j.status)).length;
+  const active=downloadState.jobs.find(j=>j.status==='downloading');
   $('downloadShortcut').textContent='下载队列'+(pending?' · '+pending:'');
   $('stopForDownloads').style.display=pending && player ? '' : 'none';
   $('resumeAfterDownloads').style.display=playbackStoppedForDownload && !player ? '' : 'none';
   $('resumeAfterDownloads').textContent=downloadState.jobs.some(j=>j.status==='downloading')?'继续观看（暂停下载）':'继续观看';
   syncEpisodeDownloadButtons();
   if(!$('downloadPanel').classList.contains('show')) return;
+  const summary=$('downloadSpeedSummary');
+  summary.textContent=active?'当前下载速度 '+formatDownloadRate(active.speedBps):pending?'等待下载':'当前无下载';
+  summary.classList.toggle('active',!!active);
   if(document.activeElement!==$('downloadDirectory')) $('downloadDirectory').value=downloadState.directory||'';
   const list=$('downloadJobs'); list.replaceChildren();
   if(!downloadState.jobs.length){ const empty=document.createElement('p'); empty.className='muted'; empty.textContent='队列为空。在节目选集旁点击“下载”即可加入。'; list.appendChild(empty); return; }
   for(const job of downloadState.jobs){
     const row=document.createElement('div'); row.className='downloadJob';
-    const body=document.createElement('div'); body.className='body';
-    const name=document.createElement('div'); name.className='name'; name.textContent=job.title+' · '+job.playname;
-    const status=document.createElement('div'); status.className='status';
+    const head=document.createElement('div'); head.className='head';
+    const name=document.createElement('div'); name.className='name'; name.textContent=job.title+' · '+job.playname; name.title=name.textContent;
+    const state=document.createElement('div'); state.className='state'; state.textContent=downloadLabels[job.status]||job.status;
+    head.append(name,state); row.appendChild(head);
     const received=(job.completedSec||0)+(job.currentSec||0), duration=job.episode?.duration||1;
     const progress=job.status==='done'?100:Math.min(99,Math.round(100*received/duration));
     const confirmingEnd=job.status==='downloading' && received>=duration;
-    status.textContent=(downloadLabels[job.status]||job.status)+(job.status==='done'?' · '+job.output:job.status==='failed'?' · '+(job.error||'请重试'):confirmingEnd?' · 99% · 正在确认片尾':' · '+progress+'%');
-    body.append(name,status);
     if(['downloading','queued','waiting'].includes(job.status)){
-      const bar=document.createElement('progress'); bar.max=100; bar.value=progress; body.appendChild(bar);
+      const metrics=document.createElement('div'); metrics.className='metrics';
+      const percent=document.createElement('span'); percent.innerHTML='进度 <strong>'+progress+'%</strong>'; metrics.appendChild(percent);
+      if(job.status==='downloading'){
+        const speed=document.createElement('span'); speed.innerHTML='速度 <strong>'+formatDownloadRate(job.speedBps)+'</strong>'; metrics.appendChild(speed);
+      }
+      row.appendChild(metrics);
+      const bar=document.createElement('progress'); bar.max=100; bar.value=progress; row.appendChild(bar);
     }
-    row.appendChild(body);
+    const detail=document.createElement('div'); detail.className='detailLine';
+    if(job.status==='done') detail.textContent=job.output||'文件已保存';
+    else if(job.status==='failed') detail.textContent=job.error||'请重试';
+    else if(confirmingEnd) detail.textContent='正在确认片尾';
+    else if(job.status==='waiting') detail.textContent='停止播放后自动继续';
+    else if(job.status==='queued') detail.textContent='等待前面的任务完成';
+    else if(job.status==='cancelled') detail.textContent='任务已取消';
+    if(detail.textContent){ detail.title=detail.textContent; row.appendChild(detail); }
+    const buttons=document.createElement('div'); buttons.className='buttons';
     if(['queued','waiting','downloading','failed','cancelled'].includes(job.status)){
       const action=document.createElement('button'); action.textContent=['failed','cancelled'].includes(job.status)?'重试':'取消';
       action.onclick=async()=>{ action.disabled=true; try{
         await jget('api/downloads/'+encodeURIComponent(job.id)+'/'+(['failed','cancelled'].includes(job.status)?'retry':'cancel'),{method:'POST'});
         $('downloadError').textContent=''; await refreshDownloads();
       }catch(e){ $('downloadError').textContent=e.message||'操作失败'; action.disabled=false; } };
-      row.appendChild(action);
+      buttons.appendChild(action);
     }
     if(job.status==='cancelled'){
       const remove=document.createElement('button'); remove.textContent='移除';
@@ -333,8 +365,9 @@ function renderDownloads(){
         await jget('api/downloads/'+encodeURIComponent(job.id),{method:'DELETE'});
         $('downloadError').textContent=''; await refreshDownloads();
       }catch(e){ $('downloadError').textContent=e.message||'移除失败'; remove.disabled=false; } };
-      row.appendChild(remove);
+      buttons.appendChild(remove);
     }
+    if(buttons.childElementCount) row.appendChild(buttons);
     list.appendChild(row);
   }
 }

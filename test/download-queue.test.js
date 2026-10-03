@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { DownloadQueue } = require('../download-queue');
+const { DownloadQueue, FileWriteRate } = require('../download-queue');
 
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
 const ffprobe = process.env.FFPROBE || 'ffprobe';
@@ -18,6 +18,22 @@ async function until(check, timeoutMs = 30000) {
   }
   throw new Error('等待队列完成超时');
 }
+
+test('下载速度显示近八秒文件增长，停写后回到零', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'taoxing-rate-test-'));
+  try {
+    const file = path.join(temp, 'segment.mp4');
+    const rate = new FileWriteRate(file, 1000);
+    fs.writeFileSync(file, Buffer.alloc(1024 * 1024));
+    assert.equal(rate.sample(3000), 524288);
+    fs.appendFileSync(file, Buffer.alloc(2 * 1024 * 1024));
+    assert.equal(rate.sample(5000), 786432);
+    for (const now of [7000, 9000, 11000, 13000]) rate.sample(now);
+    assert.equal(rate.bps, 0, '文件停止增长后不保留旧速度');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
 
 test('播放优先、按加入顺序下载，断流后续取并生成可解码 MP4', { timeout: 40000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'taoxing-download-test-'));

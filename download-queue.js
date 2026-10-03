@@ -17,6 +17,26 @@ const cleanName = value => {
   return short || '节目';
 };
 
+// 以最终写入 MP4 的字节数衡量有效下载速度；保留最近五次采样（约 8 秒）。
+class FileWriteRate {
+  constructor(file, now = Date.now()) {
+    this.file = file;
+    this.samples = [{ at: now, bytes: 0 }];
+    this.bps = null;
+  }
+
+  sample(now = Date.now()) {
+    let bytes = 0;
+    try { bytes = fs.statSync(this.file).size; } catch {}
+    if (bytes < this.samples.at(-1).bytes) this.samples = [{ at: now, bytes }];
+    else this.samples.push({ at: now, bytes });
+    while (this.samples.length > 5) this.samples.shift();
+    const first = this.samples[0], elapsed = now - first.at;
+    this.bps = elapsed >= 1000 ? Math.max(0, Math.round((bytes - first.bytes) * 1000 / elapsed)) : null;
+    return this.bps;
+  }
+}
+
 class DownloadQueue {
   constructor({ root, port, ffmpeg, getActiveStream, log = console }) {
     this.root = root;
@@ -56,7 +76,8 @@ class DownloadQueue {
   }
 
   snapshot() {
-    return { directory: this.directory, jobs: this.jobs.map(j => ({ ...j })) };
+    return { directory: this.directory, jobs: this.jobs.map(j => ({ ...j,
+      speedBps: this.active?.job === j && j.status === 'downloading' ? this.active.rate.bps : null })) };
   }
 
   setDirectory(input) {
@@ -248,7 +269,7 @@ class DownloadQueue {
         '-map', '0:v:0', '-map', '0:a?', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k',
         '-movflags', '+faststart', output];
       const proc = spawn(this.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      this.active = { job, proc, sid };
+      this.active = { job, proc, sid, rate: new FileWriteRate(output) };
       let lastMedia = 0, lastGrow = Date.now(), lastPersist = 0, warned = '', progressText = '';
       proc.stdout.on('data', chunk => {
         const lines = (progressText + chunk.toString()).split(/\r?\n/);
@@ -263,6 +284,7 @@ class DownloadQueue {
       proc.stderr.on('data', chunk => { warned = (warned + chunk.toString()).slice(-700); });
       let stopping = false;
       const monitor = setInterval(() => {
+        if (this.active?.proc === proc) this.active.rate.sample();
         const limit = lastMedia > 0 ? 60000 : 180000;
         if (!stopping && Date.now() - lastGrow > limit) {
           stopping = true; this.log.log('[downloads] 无数据超时，保存已有片段后续取', job.id);
@@ -270,7 +292,7 @@ class DownloadQueue {
           setTimeout(() => { if (this.active?.proc === proc) proc.kill('SIGINT'); }, 5000).unref();
           setTimeout(() => { if (proc.exitCode === null) proc.kill('SIGKILL'); }, 12000).unref();
         }
-      }, 5000);
+      }, 2000);
       let settled = false;
       const done = () => {
         if (settled) return;
@@ -332,4 +354,4 @@ class DownloadQueue {
   }
 }
 
-module.exports = { DownloadQueue };
+module.exports = { DownloadQueue, FileWriteRate };
