@@ -997,7 +997,10 @@ setInterval(()=>{
     }
     return;
   }
-  $('loadtx').textContent = bufEndAbs<pendingResumeAt ? ('缓冲中…还需 '+Math.ceil(pendingResumeAt-bufEndAbs)+' 秒')
+  // 这里是与上次观看位置相差的节目时长，不是预计等待的实际秒数。
+  const missing=Math.ceil(pendingResumeAt-bufEndAbs);
+  $('loadtx').textContent = missing>0
+    ? (V.buffered.length===0 && now-resumeLastGrow>15000 ? '片源暂未供数 · 距上次进度约'+missing+'秒内容' : '恢复进度 · 还差约'+missing+'秒节目内容')
     : ('缓冲中… '+Math.floor(ahead)+'/'+pendingMargin+' 秒'+(flowing?'':'(源正在准备)'));
 }, 500);
 
