@@ -325,6 +325,14 @@ function renderDownloads(){
       }catch(e){ $('downloadError').textContent=e.message||'操作失败'; action.disabled=false; } };
       row.appendChild(action);
     }
+    if(job.status==='cancelled'){
+      const remove=document.createElement('button'); remove.textContent='移除';
+      remove.onclick=async()=>{ remove.disabled=true; try{
+        await jget('api/downloads/'+encodeURIComponent(job.id),{method:'DELETE'});
+        $('downloadError').textContent=''; await refreshDownloads();
+      }catch(e){ $('downloadError').textContent=e.message||'移除失败'; remove.disabled=false; } };
+      row.appendChild(remove);
+    }
     list.appendChild(row);
   }
 }

@@ -764,6 +764,10 @@ app.post('/api/downloads/:id/retry', (req,res)=>{
   try{ res.json({job:downloads.retry(req.params.id)}); }
   catch(e){ res.status(400).json({error:String(e.message||e)}); }
 });
+app.delete('/api/downloads/:id', (req,res)=>{
+  try{ res.json({job:downloads.remove(req.params.id)}); }
+  catch(e){ res.status(400).json({error:String(e.message||e)}); }
+});
 
 function toInitials(han){ return pinyin(han,{pattern:'first',toneType:'none',type:'array'}).join('').toUpperCase().replace(/[^A-Z]/g,''); }
 function searchTitle(s){

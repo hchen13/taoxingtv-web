@@ -147,3 +147,27 @@ test('服务正常退出会保存当前片段，重启后从该进度续取', { 
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('取消后可从队列移除，其他排队任务保持原顺序', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'taoxing-remove-test-'));
+  const output = path.join(temp, 'output');
+  fs.mkdirSync(output);
+  const queue = new DownloadQueue({ root: path.join(temp, 'state'), port: 1, ffmpeg,
+    getActiveStream: () => ({ ff: {}, sid: 'browser-playback' }), log: { log() {}, error() {} } });
+  try {
+    queue.setDirectory(output);
+    const episode = channelId => ({ channelId, ip: '127.0.0.1', port: 12345,
+      duration: 60, playname: '第01集', sourceMode: 0 });
+    const first = queue.enqueue({ playid: 'series', episodeIndex: 0, title: '剧集', episode: episode('A'.repeat(32)) });
+    const second = queue.enqueue({ playid: 'series', episodeIndex: 1, title: '剧集', episode: episode('B'.repeat(32)) });
+    assert.throws(() => queue.remove(first.id), /只能移除已取消/);
+    queue.cancel(second.id);
+    queue.remove(second.id);
+    assert.deepEqual(queue.snapshot().jobs.map(j => j.id), [first.id]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(queue.stateFile, 'utf8')).jobs.map(j => j.id), [first.id]);
+    assert.throws(() => queue.remove(second.id), /任务不存在/);
+  } finally {
+    await queue.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

@@ -123,6 +123,18 @@ class DownloadQueue {
     return job;
   }
 
+  remove(id) {
+    const index = this.jobs.findIndex(j => j.id === id);
+    if (index < 0) throw new Error('任务不存在');
+    const job = this.jobs[index];
+    if (job.status !== 'cancelled') throw new Error('只能移除已取消的任务');
+    if (this.active?.job.id === id) throw new Error('正在结束下载，请稍后移除');
+    fs.rmSync(path.join(this.jobsDir, id), { recursive: true, force: true });
+    this.jobs.splice(index, 1);
+    this.persist();
+    return job;
+  }
+
   playbackActive() {
     const stream = this.getActiveStream();
     return !!stream && !!(stream.ff || stream.starting || stream.splicing) &&
