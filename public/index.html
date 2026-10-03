@@ -15,6 +15,9 @@
   .search{padding:12px}
   .search input{width:100%;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);outline:none}
   .search input:focus{border-color:var(--acc)}
+  .downloadShortcut{padding:0 12px 8px}
+  .downloadShortcut button{width:100%;padding:7px 10px;text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);cursor:pointer}
+  .downloadShortcut button:hover{border-color:var(--acc)}
   .cats{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px 4px}
   .cats button{padding:5px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:16px;color:var(--dim);font-size:13px;cursor:pointer}
   .cats button.on{background:var(--acc2);color:#fff;border-color:var(--acc2)}
@@ -95,13 +98,31 @@
   .detail .desc{color:#c3cad8;font-size:18px;line-height:1.85;max-width:1000px}
   .detail .epstitle{color:var(--dim);font-size:18px;margin:14px 0 14px}
   .detail .eps{display:grid;gap:24px 12px}
-  .detail .eps .epcell{position:relative}
-  .detail .eps .epcell>button{width:100%}
-  .detail .eps .epcell.last>button{border-color:var(--acc);background:#243049}
+  .detail .eps .epcell{position:relative;display:flex;gap:5px}
+  .detail .eps .epcell .epplay{flex:1;min-width:0}
+  .detail .eps .epcell .epqueue{width:auto;flex:none;padding:8px 10px;font-size:12px;color:#cfe0ff}
+  .detail .eps .epcell .epqueue:disabled{opacity:.65;cursor:default}
+  .detail .eps .epcell.last .epplay{border-color:var(--acc);background:#243049}
   .detail .eps .epcell.last::after{content:'上次看到';position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:var(--acc);color:#fff;font-size:12px;font-weight:600;padding:2px 9px;border-radius:9px;white-space:nowrap;z-index:2;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.45)}
   .detail .eps button{padding:16px 16px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);cursor:pointer;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .detail .eps button:hover{border-color:var(--acc);background:#243049}
   .detail .close{position:absolute;top:18px;right:22px;background:none;border:none;color:var(--dim);font-size:26px;cursor:pointer;z-index:9}
+  .detail .downloadOpen{position:absolute;top:22px;right:68px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);padding:7px 11px;cursor:pointer;z-index:9}
+  .downloadPanel{position:absolute;inset:0;background:rgba(13,15,20,.98);z-index:11;display:none;padding:28px 34px;overflow-y:auto}
+  .downloadPanel.show{display:block}
+  .downloadPanel h2{font-size:25px;margin-bottom:10px}
+  .downloadPanel .close{position:absolute;top:18px;right:22px;background:none;border:none;color:var(--dim);font-size:26px;cursor:pointer}
+  .downloadPanel .note{color:var(--dim);margin-bottom:16px}
+  .downloadDir{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  .downloadDir input{flex:1;min-width:210px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt)}
+  .downloadDir button,.downloadJob button{padding:8px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--txt);cursor:pointer}
+  .downloadDir button:hover,.downloadJob button:hover{border-color:var(--acc)}
+  .downloadError{min-height:20px;color:#ff8686;margin-bottom:8px}
+  .downloadJob{padding:13px 0;border-top:1px solid var(--line);display:flex;align-items:center;gap:14px}
+  .downloadJob .body{flex:1;min-width:0}
+  .downloadJob .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .downloadJob .status{color:var(--dim);font-size:12px;margin-top:3px;overflow-wrap:anywhere}
+  .downloadJob progress{width:100%;height:5px;accent-color:var(--acc);margin-top:6px}
   #wake{position:fixed;inset:0;z-index:99;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
   #wake.hide{display:none}
   #wake .logo2{font-size:34px;font-weight:800}#wake .step{color:var(--dim);font-size:14px}
@@ -145,6 +166,9 @@
     .detail .epstitle{font-size:14px;margin:10px 0}
     .detail .eps{gap:16px 8px}
     .detail .eps button{font-size:15px;padding:11px 8px;border-radius:8px}
+    .detail .eps .epcell .epqueue{font-size:11px;padding:6px}
+    .detail .downloadOpen{top:9px;right:50px;padding:5px 8px;font-size:12px}
+    .downloadPanel{position:fixed;z-index:32;padding:16px 14px}
     .detail .close{top:6px;right:6px;font-size:24px;padding:6px 10px}
   }
   @media (orientation:portrait) and (max-width:760px){   /* 竖屏手机:上下堆叠——视频固定在顶部(16:9),节目栏占满下方;没有"收起侧栏"的概念 */
@@ -177,7 +201,7 @@
   <aside class="side">
     <div class="tabs"><button id="tabLive" class="on" onclick="switchTab('live')">直播</button><button id="tabVod" onclick="switchTab('vod')">点播</button></div>
     <div id="liveBox"><div class="search"><input id="q" placeholder="搜索频道…"></div><div class="list" id="listLive"></div></div>
-    <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名或拼音首字母…"></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
+    <div id="vodBox" style="display:none"><div class="search"><input id="vq" placeholder="搜索片名或拼音首字母…"></div><div class="downloadShortcut"><button id="downloadShortcut" onclick="openDownloads()">下载队列</button></div><div class="cats" id="cats"></div><div class="list" id="listVod"></div></div>
   </aside>
   <section class="main">
     <div class="stage" id="stage">
@@ -208,11 +232,16 @@
         <button class="pbtn txt" id="rotBtn" title="横屏全屏" style="display:none">横屏</button>
         <button class="pbtn" id="fsBtn" title="全屏(双击画面)">⛶</button>
       </div>
-      <div class="detail" id="detail"><button class="close" onclick="closeDetail()">✕</button>
+      <div class="detail" id="detail"><button class="close" onclick="closeDetail()">✕</button><button class="downloadOpen" onclick="openDownloads()">下载队列</button>
         <div class="head"><div class="poster" id="dPoster"></div><div style="flex:1">
           <h2 id="dTitle"></h2><div class="meta" id="dMeta" onclick="this.classList.toggle('open')"></div><div class="desc" id="dDesc" onclick="this.classList.toggle('open')"></div></div></div>
         <div class="sourcebar" id="dSources"></div>
         <div class="epstitle">选集播放</div><div class="eps" id="dEps"></div>
+      </div>
+      <div class="downloadPanel" id="downloadPanel"><button class="close" onclick="closeDownloads()">✕</button>
+        <h2>下载队列</h2><p class="note">依次下载淘星点播源，保存到运行本服务的 Mac。播放节目时队列会等待。</p>
+        <div class="downloadDir"><label for="downloadDirectory">保存目录</label><input id="downloadDirectory" spellcheck="false" placeholder="例如 ~/Downloads"><button onclick="saveDownloadDirectory()">保存目录</button></div>
+        <div class="downloadError" id="downloadError"></div><div id="downloadJobs"></div>
       </div>
     </div>
   </section>
@@ -246,6 +275,66 @@ onMQ(MQ_STACK,applyLayout); onMQ(MQ_DRAWER,e=>{ applyLayout(); if(e.matches&&pla
 applyLayout();
 const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return (h?h+':':'')+(h?String(m).padStart(2,'0'):m)+':'+String(ss).padStart(2,'0');};
 const LS={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+let downloadState={directory:'',jobs:[]};
+const downloadLabels={queued:'排队中',waiting:'等待播放结束',downloading:'下载中',done:'已完成',failed:'失败',cancelled:'已取消'};
+async function refreshDownloads(){
+  try{ downloadState=await jget('api/downloads'); renderDownloads(); }
+  catch(e){ if($('downloadPanel').classList.contains('show')) $('downloadError').textContent=e.message||'队列加载失败'; }
+}
+function queueJobFor(playid,index){ return downloadState.jobs.find(j=>j.playid===playid&&j.episodeIndex===index&&!['cancelled','failed'].includes(j.status)); }
+function syncEpisodeDownloadButtons(){
+  document.querySelectorAll('.epqueue').forEach(b=>{
+    const job=queueJobFor(b.dataset.playid,Number(b.dataset.index));
+    b.textContent=job?(job.status==='done'?'已下载':'已入队'):'下载';
+    b.disabled=!!job;
+  });
+}
+function renderDownloads(){
+  const pending=downloadState.jobs.filter(j=>['queued','waiting','downloading'].includes(j.status)).length;
+  $('downloadShortcut').textContent='下载队列'+(pending?' · '+pending:'');
+  syncEpisodeDownloadButtons();
+  if(!$('downloadPanel').classList.contains('show')) return;
+  if(document.activeElement!==$('downloadDirectory')) $('downloadDirectory').value=downloadState.directory||'';
+  const list=$('downloadJobs'); list.replaceChildren();
+  if(!downloadState.jobs.length){ const empty=document.createElement('p'); empty.className='muted'; empty.textContent='队列为空。在节目选集旁点击“下载”即可加入。'; list.appendChild(empty); return; }
+  for(const job of downloadState.jobs){
+    const row=document.createElement('div'); row.className='downloadJob';
+    const body=document.createElement('div'); body.className='body';
+    const name=document.createElement('div'); name.className='name'; name.textContent=job.title+' · '+job.playname;
+    const status=document.createElement('div'); status.className='status';
+    const progress=Math.min(100,Math.round(100*((job.completedSec||0)+(job.currentSec||0))/(job.episode?.duration||1)));
+    status.textContent=(downloadLabels[job.status]||job.status)+(job.status==='done'?' · '+job.output:job.status==='failed'?' · '+(job.error||'请重试'):' · '+progress+'%');
+    body.append(name,status);
+    if(['downloading','queued','waiting'].includes(job.status)){
+      const bar=document.createElement('progress'); bar.max=100; bar.value=progress; body.appendChild(bar);
+    }
+    row.appendChild(body);
+    if(['queued','waiting','downloading','failed','cancelled'].includes(job.status)){
+      const action=document.createElement('button'); action.textContent=['failed','cancelled'].includes(job.status)?'重试':'取消';
+      action.onclick=async()=>{ action.disabled=true; try{
+        await jget('api/downloads/'+encodeURIComponent(job.id)+'/'+(['failed','cancelled'].includes(job.status)?'retry':'cancel'),{method:'POST'});
+        $('downloadError').textContent=''; await refreshDownloads();
+      }catch(e){ $('downloadError').textContent=e.message||'操作失败'; action.disabled=false; } };
+      row.appendChild(action);
+    }
+    list.appendChild(row);
+  }
+}
+function openDownloads(){ $('downloadPanel').classList.add('show'); $('downloadError').textContent=''; refreshDownloads(); }
+function closeDownloads(){ $('downloadPanel').classList.remove('show'); }
+async function saveDownloadDirectory(){
+  try{ downloadState=await jget('api/downloads/directory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({directory:$('downloadDirectory').value})});
+    $('downloadError').textContent=''; renderDownloads();
+  }catch(e){ $('downloadError').textContent=e.message||'目录不可用'; }
+}
+async function enqueueEpisode(playid,index,button){
+  button.disabled=true; button.textContent='添加中…';
+  try{ await jget('api/downloads',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playid,episodeIndex:index})});
+    await refreshDownloads();
+  }catch(e){ button.disabled=false; button.textContent='下载'; openDownloads(); $('downloadError').textContent=e.message||'加入队列失败'; }
+}
+refreshDownloads();
+setInterval(()=>{if(!document.hidden)refreshDownloads();},5000);
 filmsCache=LS.get('txtv_native_pages_v1',{});
 const DETAIL_FRESH_MS=5*60*1000, DETAIL_STALE_MS=24*60*60*1000;
 let detailCache=LS.get('txtv_details_v1',{}), searchCache=LS.get('txtv_search_v1',{});
@@ -517,13 +606,16 @@ function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d,
   const E=$('dEps'); E.innerHTML='';
   const eps=d.episodes||[]; const maxLen=Math.max(2,...eps.map(e=>(e.playname||'').length));
   const narrow=matchMedia('(max-width:900px),(max-height:520px)').matches;   // 手机:字号小,格子也相应小
-  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+(narrow?Math.min(200,Math.max(64,maxLen*16+22)):Math.min(320,Math.max(76,maxLen*24+40)))+'px,1fr))';
+  E.style.gridTemplateColumns='repeat(auto-fill,minmax('+(narrow?Math.min(240,Math.max(120,maxLen*16+72)):Math.min(380,Math.max(140,maxLen*24+100)))+'px,1fr))';
   const lastEp=(LS.get('txtv_lastep',{}))[selected.playid];   // 本片上次看到的集(undefined=没看过)
   eps.forEach((ep,i)=>{ const cell=document.createElement('div'); cell.className='epcell';
-    const b=document.createElement('button'); b.textContent=ep.playname; b.title=ep.playname;
+    const b=document.createElement('button'); b.className='epplay'; b.textContent=ep.playname; b.title='播放 '+ep.playname;
     if(lastEp===i){ cell.classList.add('last'); }
     else if(curFilm&&curFilm.playid===selected.playid&&i===curEpIdx){ b.style.borderColor='var(--acc)'; b.style.background='#243049'; }
-    b.onclick=()=>{ closeDetail(); curFilm=selected; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(selected.playid,i)); }; cell.appendChild(b); E.appendChild(cell); }); }
+    b.onclick=()=>{ closeDetail(); curFilm=selected; curEps=eps; curEpIdx=i; playEpisode(resumePctFor(selected.playid,i)); };
+    const q=document.createElement('button'); q.className='epqueue'; q.dataset.playid=selected.playid; q.dataset.index=i; q.title='加入下载队列';
+    q.onclick=()=>enqueueEpisode(selected.playid,i,q);
+    cell.append(b,q); E.appendChild(cell); }); syncEpisodeDownloadButtons(); }
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
 function closeDetail(){ ++detailSeq; $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
@@ -934,7 +1026,7 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
     drainChecking=false;
   }
 } }, 2000);  // 有播放器(观看会话中,含暂停)就保活;暂停/浏览空闲则由空闲定时器回收
-window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('api/leave'); });
+window.addEventListener('pagehide',()=>{ saveState(); navigator.sendBeacon('api/leave?sid='+encodeURIComponent(activeStreamSid)); });
 boot();
 </script>
 </body></html>

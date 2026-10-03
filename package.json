@@ -4,7 +4,8 @@
   "description": "淘星TV 浏览器版 —— 把小米电视IPTV/点播APK跑成自定义网页播放器(后台无头模拟器+Frida+ffmpeg+mpegts.js)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "iptv",

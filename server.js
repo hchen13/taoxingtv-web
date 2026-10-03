@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const { pinyin } = require('pinyin-pro');
+const { DownloadQueue } = require('./download-queue');
 // 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
 { const _l=console.log.bind(console), _e=console.error.bind(console);
   const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
@@ -633,7 +634,7 @@ app.get('/stream/:chid', (req,res)=>{ const chid=req.params.chid; serveStream(re
 }, 'live:'+chid, true, false, {copyLive:LIVE_COPY_IDS.has(chid)||req.query.copy==='1'}); });
 
 app.post('/api/stop', async (req,res)=>{ lastActivity=Date.now(); cleanupCurrent(); res.json({ok:true}); });
-app.post('/api/leave', async (req,res)=>{ cleanupCurrent(); res.json({ok:true}); });
+app.post('/api/leave', async (req,res)=>{ if(req.query.sid===current.sid || (!req.query.sid && !String(current.sid||'').startsWith('download-'))) cleanupCurrent(); res.json({ok:true}); });
 
 // ---------- VOD 点播 ----------
 const xml = new XMLParser({ ignoreAttributes:false, cdataPropName:'cdata', trimValues:true });
@@ -699,9 +700,8 @@ app.get('/api/vod/list', async (req,res)=>{
     },60*60*1000));
   } catch(e){ console.warn('[vod list]',e.message||e); res.status(503).json({error:''+(e.message||e)}); }
 });
-app.get('/api/vod/detail', async (req,res)=>{
-  try { const playid=req.query.playid; if(!playid) return res.status(400).json({error:'no playid'});
-    res.json(await cachedVod('detail:'+playid,30*60*1000,async()=>{
+async function vodDetail(playid){
+  return cachedVod('detail:'+playid,30*60*1000,async()=>{
     if(playid.startsWith('old:')){
       const m=/^old:([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+\.xml)$/.exec(playid);
       if(!m) throw new Error('旧点播地址无效');
@@ -726,8 +726,41 @@ app.get('/api/vod/detail', async (req,res)=>{
       return {playname:txt(p.playname),channelId,ip,port,playtag:tag,duration:parseInt(txt(p.duration)||'0',10)};
     }).filter(Boolean);
     return {film:{title:txt(f.title),actor:txt(f.actor),director:txt(f.director),type:txt(f.type),area:txt(f.area),year:txt(f.year),content:txt(f.content),remark:txt(f.remark)},episodes:eps};
-    },60*60*1000));
+    },60*60*1000);
+}
+app.get('/api/vod/detail', async (req,res)=>{
+  try { const playid=req.query.playid; if(!playid) return res.status(400).json({error:'no playid'});
+    res.json(await vodDetail(playid));
   } catch(e){ res.status(503).json({error:''+(e.message||e)}); }
+});
+
+// 离线下载在服务端串行运行；关掉网页不影响队列，播放中的原生取流优先。
+const downloads = new DownloadQueue({
+  root:pathMod.join(__dirname,'cache','downloads'), port:PORT, ffmpeg:FFMPEG,
+  getActiveStream:()=>current,
+});
+app.get('/api/downloads', (req,res)=>res.json(downloads.snapshot()));
+app.post('/api/downloads/directory', (req,res)=>{
+  try{ res.json(downloads.setDirectory(req.body?.directory)); }
+  catch(e){ res.status(400).json({error:String(e.message||e)}); }
+});
+app.post('/api/downloads', async(req,res)=>{
+  try{
+    const playid=req.body?.playid, index=req.body?.episodeIndex;
+    if(typeof playid!=='string'||playid.length>300||!Number.isInteger(index)||index<0) return res.status(400).json({error:'选集无效'});
+    const detail=await vodDetail(playid), episode=detail.episodes?.[index];
+    if(!episode) return res.status(404).json({error:'选集不存在'});
+    const job=downloads.enqueue({playid,episodeIndex:index,title:detail.film.title,episode});
+    res.json({job});
+  }catch(e){ res.status(503).json({error:String(e.message||e)}); }
+});
+app.post('/api/downloads/:id/cancel', (req,res)=>{
+  try{ res.json({job:downloads.cancel(req.params.id)}); }
+  catch(e){ res.status(400).json({error:String(e.message||e)}); }
+});
+app.post('/api/downloads/:id/retry', (req,res)=>{
+  try{ res.json({job:downloads.retry(req.params.id)}); }
+  catch(e){ res.status(400).json({error:String(e.message||e)}); }
 });
 
 function toInitials(han){ return pinyin(han,{pattern:'first',toneType:'none',type:'array'}).join('').toUpperCase().replace(/[^A-Z]/g,''); }
@@ -903,7 +936,14 @@ app.get('/logo', async (req,res)=>{
   res.status(404).end();
 });
 
-function gracefulExit(sig){ console.log('['+sig+'] 退出:释放当前流,保留模拟器供重启复用(空闲定时器会回收;登出/关机由系统回收)'); try{ cleanupCurrent(); }catch(e){} process.exit(0); }
+let exiting=false;
+async function gracefulExit(sig){
+  if(exiting) return; exiting=true;
+  console.log('['+sig+'] 退出:保存下载进度并释放当前流');
+  try{ await downloads.close(); }catch(e){ console.error('[downloads] 退出时保存失败',e); }
+  try{ cleanupCurrent(); }catch(e){}
+  process.exit(0);
+}
 process.on('SIGINT', ()=>gracefulExit('SIGINT'));
 process.on('SIGTERM', ()=>gracefulExit('SIGTERM'));   // launchd 用 SIGTERM
 app.listen(PORT, ()=>console.log(`\n淘星TV: http://localhost:${PORT}  (空闲 ${IDLE_MS/1000}s 自动关引擎, ffmpeg 转码)\n`));
