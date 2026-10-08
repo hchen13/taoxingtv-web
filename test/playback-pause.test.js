@@ -57,6 +57,14 @@ test('codec fallback preserves an explicit user pause', () => {
   assert.equal(h.restarts[0].keepPaused, true);
 });
 
+test('codec fallback retains the pending resume position and remembers compatibility mode', () => {
+  const h = viewer(); h.c.pendingResumeAt = 654; h.v.currentTime = 0;
+  h.run('fallbackToTranscode();');
+  assert.equal(h.c.pendingResumeAt, 654);
+  assert.equal(h.restarts[0].pct, 21);
+  assert.deepEqual(Array.from(h.saved.txtv_transcode_v1), ['episode']);
+});
+
 test('an automatic decoder pause does not stop recovery of active viewing', () => {
   const h = viewer(); h.v.paused = true;
   h.run('doRecover();'); h.timers.shift()();

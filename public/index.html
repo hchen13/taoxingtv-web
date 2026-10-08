@@ -717,7 +717,8 @@ function renderDetail(){ if(!lastDetail)return; const {f,selected,sourceIndex,d,
 function reopenEps(){ if(lastDetail) renderDetail(); else if(curFilm) openDetail(curFilm); }
 function closeDetail(){ ++detailSeq; $('detail').classList.remove('show'); }
 // —— 点播播放(按 percent 取流)+ 上/下集 ——
-const transcodeFallback=new Set();
+const savedTranscodeFallback=LS.get('txtv_transcode_v1',[]);
+const transcodeFallback=new Set(Array.isArray(savedTranscodeFallback)?savedTranscodeFallback.slice(-32):[]);
 function playEpisode(percent){ const ep=curEps[curEpIdx]; if(!ep)return; curId=ep.channelId; vodDur=ep.duration||0;
   vodBase=vodDur?Math.floor(percent/100*vodDur):0; curPct=percent;
   const title=(curFilm.title||'')+' · '+ep.playname; window.playTitle=title;
@@ -770,7 +771,7 @@ function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Ma
     if(!isLive && (b===mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED || b===mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED)){ if(fallbackToTranscode()) return; }
     if(a===mpegts.ErrorTypes.MEDIA_ERROR && b===mpegts.ErrorDetails.MEDIA_MSE_ERROR){ onMediaFailure(b); return; }
     if(!switching) doRecover(); });
-  if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); resumeLastCheck=0; try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
+  if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); resumeLastReady=0; resumeReadyGrow=Date.now(); resumeLastCheck=0; try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
   else V.play().catch(()=>{});
   flashUI();
 }
@@ -980,9 +981,10 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
   // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
 }
 function fallbackToTranscode(){ const ep=curEps[curEpIdx]; if(!player||!ep||transcodeFallback.has(ep.channelId))return false;
-  const pos=vodBase+V.currentTime, pct=vodDur?Math.min(96,Math.max(curPct,Math.floor(pos/vodDur*100))):curPct;
+  const pos=Math.max(pendingResumeAt||0,vodBase+V.currentTime), pct=vodDur?Math.min(96,Math.max(curPct,Math.floor(pos/vodDur*100))):curPct;
   const newBase=vodDur?Math.floor(pct/100*vodDur):0;
-  transcodeFallback.add(ep.channelId); console.warn('媒体解码失败，改用转码',ep.channelId);
+  transcodeFallback.add(ep.channelId); LS.set('txtv_transcode_v1',Array.from(transcodeFallback).slice(-32));
+  console.warn('媒体时间轴或解码异常，改用兼容播放',ep.channelId);
   fromRecovery=true; try{ pendingResumeAt=pos-newBase>3?pos:0; pendingMargin=resumeMargin(pos); pendingStartPaused=vodUserPaused; playEpisode(pct); }finally{ fromRecovery=false; }
   return true; }
 let failedMediaSid='', failedMediaChannel='', failedMediaAt=0, failedMediaCount=0;
@@ -1015,12 +1017,13 @@ setInterval(async ()=>{
   const frozen = Math.abs(V.currentTime-wdLast)<0.1; wdLast=V.currentTime;
   if(frozen && V.readyState<3){ wdStall++; } else { wdStall=0; }
   if(wdStall>=4 && !checking){ checking=true;
-    try{ const st=await jget('api/streamstate');
+    try{ if(!isLiveNow && hasBufferedGapAfter(V.currentTime) && fallbackToTranscode()){ wdStall=0; return; }
+      const st=await jget('api/streamstate');
       if(streamConfirmedEnded(st,activeStreamSid) && playedToEnd() && atBufferedEnd()){ wdStall=0; atEnd(); }
       else if(!st.alive){ wdStall=0; doRecover(); }   // 源断流不等于本集播完，片尾仍要先重取
       else if(wdStall>=8){ wdStall=0; doRecover(); }   // alive但播放中持续冻结~24s=源真卡住(点播已去掉ffmpeg读超时,改由此处检测)->从当前位置重取
       // else(alive且冻结<24s):临时卡顿,先等缓冲自愈,wdStall继续累加到8再重取
-    }catch(e){} checking=false;
+    }catch(e){}finally{ checking=false; }
   }
 }, 3000);
 V.addEventListener('waiting', ()=>{ if(!player||recovering||pendingResumeAt||V.paused) return;
@@ -1065,14 +1068,26 @@ function startHeartbeat(){ if(heartbeatTimer)return; heartbeatTimer=setInterval(
 // 断流重取只能落到最近的整数百分点(可能比中断处早几十秒)。做法:重取后先不播,静默缓冲,
 // 等缓冲越过中断位置、并且再往后攒够 RESUME_MARGIN 秒余量,才跳回中断处继续播。
 // 余量是关键:缓冲一到就播往往刚播就见底->又断->又回到那个百分点->死循环。
-let pendingResumeAt=0, pendingMargin=12, resumeLastBuf=0, resumeLastGrow=0, resumeLastCheck=0, resumeChecking=false;
+let pendingResumeAt=0, pendingMargin=12, resumeLastBuf=0, resumeLastGrow=0, resumeLastReady=0, resumeReadyGrow=0, resumeLastCheck=0, resumeChecking=false;
 const RESUME_MARGIN=10, START_PREBUFFER=6;   // 起播预缓冲 6 秒:起播就播(canplay 时只有 1-2 秒)必然放几秒就见底->卡顿->触发恢复(表现为"回退");也别设太大,拖长每次起播/跳转的等待。(旧注释说"源每个连接只送约12MB就关"是服务端晚到 stop 造成的假象,源本身不会主动关连接,见 server.js queueStop)
+function hasBufferedGapAfter(time){
+  const end=Math.max(time,bufferedEndAt(time));
+  for(let i=0;i<V.buffered.length;i++) if(V.buffered.start(i)>end+0.5) return true;
+  return false;
+}
 setInterval(()=>{
   if(!pendingResumeAt || !player || isLiveNow || !curFilm || recovering) return;
   const bufEndAbs = V.buffered.length ? vodBase+V.buffered.end(V.buffered.length-1) : vodBase;
   const now=Date.now();
   if(bufEndAbs>resumeLastBuf+0.2){ resumeLastBuf=bufEndAbs; resumeLastGrow=now; }        // 数据在流动
   const targetTime=pendingResumeAt-vodBase, readyEnd=bufferedEndAt(targetTime);
+  // 后段数据增长不代表目标处可播。缺时间戳的关键帧会让 MSE 丢出空洞，
+  // 等更多后段数据无法填回这些洞；按目标处连续缓冲的进展及时切兼容播放。
+  if(readyEnd>resumeLastReady+0.2){ resumeLastReady=readyEnd; resumeReadyGrow=now; }
+  if(readyEnd-targetTime<pendingMargin && now-resumeReadyGrow>12000 && hasBufferedGapAfter(targetTime)){
+    if(fallbackToTranscode()) return;
+    if(now-resumeReadyGrow>20000){ doRecover(); return; }
+  }
   // 缓冲刚越过中断位置就先跳过去(此时已看过的部分变成"背后",会被自动回收,避免缓冲无限膨胀)
   if(readyEnd>targetTime && (vodBase+V.currentTime) < pendingResumeAt-0.5){
     try{ V.currentTime = targetTime; }catch(e){}
@@ -1091,7 +1106,7 @@ setInterval(()=>{
       jget('api/streamstate').then(st=>{
         if(sid!==activeStreamSid || !pendingResumeAt || recovering) return;
         if(st.alive && Date.now()-resumeLastGrow<120000){
-          $('loadtx').textContent=st.starting?'淘星源尚未送来视频，正在取流…':st.splicing?'淘星源中断，正在续接…':st.feeding?'已收到视频，正在等待解码…':'淘星源暂时无数据，正在等待续接…';
+          $('loadtx').textContent=st.starting?'淘星源尚未送来视频，正在取流…':st.splicing?'淘星源中断，正在续接…':st.feeding?'正在准备可连续播放的画面…':'淘星源暂时无数据，正在等待续接…';
           return;
         }
         doRecover();   // 服务端已明确失败，或持续两分钟没有新增可播数据
