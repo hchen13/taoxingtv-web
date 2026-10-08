@@ -1,5 +1,5 @@
 📦
-492634 /agent-src.js
+494822 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13653,11 +13653,103 @@ var init_frida_java_bridge = __esm({
   }
 });
 
+// agent-workers.js
+function checkDrained() {
+  if (closing && jobs.size === 0 && drained) {
+    drained();
+    drained = null;
+  }
+}
+function javaNetwork(kind, work) {
+  return new Promise((resolve, reject) => frida_java_bridge_default.perform(() => {
+    let id, task;
+    try {
+      if (closing) throw new Error("\u53D6\u6D41\u5F15\u64CE\u6B63\u5728\u5173\u95ED");
+      if (!Task) {
+        Task = frida_java_bridge_default.registerClass({
+          name: "com.txtv.NetworkTask" + Date.now(),
+          implements: [frida_java_bridge_default.use("java.lang.Runnable")],
+          fields: { jobId: "int" },
+          methods: {
+            run() {
+              const id2 = this.jobId.value, job = jobs.get(id2);
+              if (!job) return;
+              try {
+                job.resolve(job.work());
+              } catch (e) {
+                job.reject(new Error(String(e.stack || e)));
+              } finally {
+                jobs.delete(id2);
+                job.task.$dispose();
+                checkDrained();
+              }
+            }
+          }
+        });
+      }
+      let pool = pools.get(kind);
+      if (!pool) {
+        const executor = frida_java_bridge_default.use("java.util.concurrent.Executors").newFixedThreadPool(2);
+        pool = frida_java_bridge_default.retain(frida_java_bridge_default.cast(executor, frida_java_bridge_default.use("java.util.concurrent.ThreadPoolExecutor")));
+        pool.setKeepAliveTime(10, frida_java_bridge_default.use("java.util.concurrent.TimeUnit").SECONDS.value);
+        pool.allowCoreThreadTimeOut(true);
+        pools.set(kind, pool);
+      }
+      id = nextId++;
+      task = frida_java_bridge_default.retain(Task.$new());
+      task.jobId.value = id;
+      jobs.set(id, { resolve, reject, work, task });
+      pool.execute(task);
+    } catch (e) {
+      if (id != null) jobs.delete(id);
+      if (task) task.$dispose();
+      reject(new Error(String(e.stack || e)));
+    }
+  }));
+}
+function shutdownJavaNetwork() {
+  if (closePromise) return closePromise;
+  closing = true;
+  closePromise = new Promise((resolve) => {
+    drained = resolve;
+    frida_java_bridge_default.perform(() => {
+      for (const pool of pools.values()) {
+        const queued = pool.shutdownNow();
+        for (let i = 0; i < queued.size(); i++) {
+          const id = frida_java_bridge_default.cast(queued.get(i), Task).jobId.value;
+          const job = jobs.get(id);
+          if (!job) continue;
+          jobs.delete(id);
+          job.reject(new Error("\u53D6\u6D41\u5F15\u64CE\u6B63\u5728\u5173\u95ED"));
+          job.task.$dispose();
+        }
+      }
+      checkDrained();
+    });
+  });
+  return closePromise;
+}
+var pools, jobs, Task, nextId, closing, drained, closePromise;
+var init_agent_workers = __esm({
+  "agent-workers.js"() {
+    init_node_globals();
+    init_frida_java_bridge();
+    pools = /* @__PURE__ */ new Map();
+    jobs = /* @__PURE__ */ new Map();
+    Task = null;
+    nextId = 1;
+    closing = false;
+    drained = null;
+    closePromise = null;
+  }
+});
+
 // agent-src.js
 var require_agent_src = __commonJS({
   "agent-src.js"() {
     init_node_globals();
     init_frida_java_bridge();
+    init_agent_workers();
     frida_java_bridge_default.perform(() => {
       try {
         const Activity = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
@@ -13740,66 +13832,47 @@ var require_agent_src = __commonJS({
       return out;
     }
     rpc.exports = {
+      shutdownNetwork: shutdownJavaNetwork,
       dlPoster: function(pic, devPath) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = CD.VODBASE_URL.value + pic + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
-            resolve({ ret: VC.icBigFile(url, devPath, null, 0) });
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("posters", () => {
+          const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = CD.VODBASE_URL.value + pic + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+          return { ret: VC.icBigFile(url, devPath, null, 0) };
+        });
       },
       dlPosterOld: function(pic, devPath) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = CD.VODBASE_URL.value + "vod/pic/" + pic + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
-            resolve({ ret: VC.icBigFile(url, devPath, null, 0) });
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("posters", () => {
+          const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = CD.VODBASE_URL.value + "vod/pic/" + pic + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+          return { ret: VC.icBigFile(url, devPath, null, 0) };
+        });
       },
       vodSearch: function(db, keywords, type, scope) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = CD.VODSEARCH_URL.value + "?db=" + db + "&keywords=" + keywords + "&type=" + (type || "all") + "&scope=" + (scope || 0) + "&name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
-            resolve(VC.icSearch(url));
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("metadata", () => {
+          const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = CD.VODSEARCH_URL.value + "?db=" + db + "&keywords=" + keywords + "&type=" + (type || "all") + "&scope=" + (scope || 0) + "&name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+          return VC.icSearch(url);
+        });
       },
       // 电视首页“点播”使用旧 com.vod 目录；它的拼音索引与“环球剧场”不同。
       vodSearchOld: function(keywords) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = CD.VODSEARCH_URL.value + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408&keywords=" + keywords + "&im=pinyin";
-            resolve(VC.icSearch(url));
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("metadata", () => {
+          const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = CD.VODSEARCH_URL.value + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408&keywords=" + keywords + "&im=pinyin";
+          return VC.icSearch(url);
+        });
       },
       vodGetOld: function(path) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = CD.VODBASE_URL.value + path + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
-            resolve(VC.icStaticDecode(url));
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("metadata", () => {
+          const CD = frida_java_bridge_default.use("com.vod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = CD.VODBASE_URL.value + path + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+          return VC.icStaticDecode(url);
+        });
       },
       vodUrls: function() {
         return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
@@ -13839,16 +13912,12 @@ var require_agent_src = __commonJS({
       },
       // 用应用账号调 icStaticDecode 取任意 VOD 数据(pathUrl 不含 query)
       vodGet: function(pathUrl) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
-          try {
-            const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
-            const VC = frida_java_bridge_default.use("dnet.VideoClient");
-            const url = pathUrl + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
-            resolve(VC.icStaticDecode(url));
-          } catch (e) {
-            reject("" + (e.stack || e));
-          }
-        }));
+        return javaNetwork("metadata", () => {
+          const CD = frida_java_bridge_default.use("com.newvod.coredata.CoreData");
+          const VC = frida_java_bridge_default.use("dnet.VideoClient");
+          const url = pathUrl + "?name=" + CD.g_account.value + "&pass=" + CD.g_password.value + "&androidid=" + CD.g_mac.value + "&lang=cn&ver=408";
+          return VC.icStaticDecode(url);
+        });
       },
       dump: function() {
         return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {

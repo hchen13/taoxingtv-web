@@ -518,7 +518,7 @@ function resumePctFor(playid, ep){ const p=getProg()[playid]; if(!p||p.ep!==ep) 
   if(p.pct==null||p.pct<1||p.pct>=95) return 0; return Math.min(96,Math.floor(p.pct)); }       // 几乎没看/已看完 => 从头
 function saveState(){ const s={tab:mode};
   if(playbackStoppedForDownload){ const prev=LS.get('txtv_state',null); if(prev?.vod) s.vod=prev.vod; else if(prev?.live) s.live=prev.live; s.stoppedForDownload=true; LS.set('txtv_state',s); return; }
-  if(curFilm){ const pct=vodDur?(Math.max(pendingResumeAt||0,vodBase+V.currentTime)/vodDur*100):0; s.vod={film:curFilm,eps:curEps,idx:curEpIdx,dur:vodDur,percent:pct,paused:V.paused&&!pendingResumeAt};
+  if(curFilm){ const pct=vodDur?(Math.max(pendingResumeAt||0,vodBase+V.currentTime)/vodDur*100):0; s.vod={film:curFilm,eps:curEps,idx:curEpIdx,dur:vodDur,percent:pct,paused:vodUserPaused||pendingStartPaused};
     if(!isLiveNow && curFilm.playid!=null) saveProg(curFilm.playid, curEpIdx, pct); }
   else if(curId&&isLiveNow){ const c=channels.find(x=>x.channelId===curId); if(c)s.live={id:c.channelId,link:c.link,name:c.name,index:c.index}; }
   LS.set('txtv_state',s); }
@@ -736,12 +736,13 @@ function setSide(collapsed){ APP.classList.toggle('collapsed',collapsed); $('sid
 function toggleSide(){ const c=!APP.classList.contains('collapsed'); setSide(c);
   if(layoutMode()==='desk' && !fsEl()){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面常规模式记忆开合;抽屉(手机/全屏)按场景自动开合,不记忆
 try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
-let activeStreamSid='', waitTimer=null, lastPlayedTime=0, pendingStartPaused=false;
+let activeStreamSid='', waitTimer=null, lastPlayedTime=0, pendingStartPaused=false, vodUserPaused=false;
 function clearWaitTimer(){ if(waitTimer){ clearTimeout(waitTimer); waitTimer=null; } }
 function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
   playbackStoppedForDownload=false;
   const streamUrl=new URL(url,location.href); streamUrl.searchParams.set('sid',activeStreamSid); url=streamUrl.href;
   isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); clearWaitTimer(); lastPlayedTime=0; switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+  if(!isLive && pendingStartPaused) vodUserPaused=true;  // 恢复保存的暂停状态；解码器自行暂停不等于用户暂停
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   if(inDrawer()) setSide(true);   // 抽屉模式(横屏手机/全屏中):一开始播放就把抽屉收起来
   STAGE.classList.toggle('vod',!isLive); STAGE.classList.toggle('live',isLive);
@@ -824,6 +825,7 @@ if(isTouch){
 }
 // —— 控件 ——
 function togglePP(){ if(!player)return; if(V.paused){
+    vodUserPaused=false; pendingStartPaused=false;
     const ahead=V.buffered.length?V.buffered.end(V.buffered.length-1)-V.currentTime:0;
     // 直播暂停太久后 MSE 会积满旧内容；从旧位置续播可能导致音画异常或反复缓冲。
     // 超出直播延迟窗口就重新取当前流，短暂停仍可从原处继续。
@@ -831,10 +833,12 @@ function togglePP(){ if(!player)return; if(V.paused){
       startPlay(window.playTitle||$('ptitle').textContent,window.curUrl,true); $('loadtx').textContent='回到直播…'; livePauseStartedAt=0; return;
     }
     V.play();
-  }else V.pause(); }
+  }else { vodUserPaused=!isLiveNow; if(pendingResumeAt) pendingStartPaused=vodUserPaused; V.pause(); } }
 $('ppBtn').onclick=togglePP;
-V.addEventListener('play',()=>{$('ppBtn').textContent='⏸';});
-V.addEventListener('pause',()=>{$('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState();});
+V.addEventListener('play',()=>{ if(!pendingResumeAt) vodUserPaused=false; $('ppBtn').textContent='⏸'; });
+V.addEventListener('pause',()=>{ // 也接住系统媒体键的暂停；换流、预缓冲和解码错误触发的暂停不改变用户意图。
+  if(player&&!isLiveNow&&!V.error&&!V.ended&&!switching&&!recovering&&!pendingResumeAt) vodUserPaused=true;
+  $('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState(); });
 $('speed').onchange=e=>{ curSpeed=parseFloat(e.target.value); V.playbackRate=curSpeed; };
 $('fsBtn').onclick=toggleFS;
 function fsEl(){ return document.fullscreenElement||document.webkitFullscreenElement||null; }
@@ -943,7 +947,7 @@ function cancelRecovery(){ if(recoverTimer){clearTimeout(recoverTimer);recoverTi
 // 用户自己点/拖/切集:清空故障计数,并取消未完成的恢复等待和恢复目标——一切以用户最新意图为准。
 // 判据必须是"这次换流是不是恢复流程发起的"(fromRecovery),不能用 recovering:
 // 否则用户在恢复退避期间拖进度会被旧的"最远位置"顶掉(比如先拖到远处又拖回近处,会被强行拉回远处)
-function userAction(){ if(fromRecovery) return; recoverTimes=0; lastRecover=0; pendingResumeAt=0; pendingStartPaused=false;
+function userAction(){ if(fromRecovery) return; recoverTimes=0; lastRecover=0; pendingResumeAt=0; pendingStartPaused=false; vodUserPaused=false;
   if(recoverTimer){ clearTimeout(recoverTimer); recoverTimer=null; } recovering=false; }
 function playedToEnd(){ return !!vodDur && vodBase+V.currentTime>=vodDur-1.5; }
 function streamConfirmedEnded(st,sid){
@@ -970,7 +974,7 @@ function doRecover(){   // 断流/解码错误:先从当前位置重取续播;�
     if(isLiveNow){ startPlay(window.playTitle||$('ptitle').textContent, window.curUrl, true); }
     else if(curFilm){ const pct=vodDur?Math.max(curPct,Math.min(96,Math.floor(pos/vodDur*100))):0;
       const newBase=vodDur?Math.floor(pct/100*vodDur):0;
-      pendingResumeAt = (pos-newBase>3) ? pos : 0; pendingMargin = resumeMargin(pos);   // 重取只能落到最近的1%(可能比中断处早几十秒):设定恢复目标,先静默缓冲越过它+攒余量再播,绝不让用户回头重看
+      pendingResumeAt = (pos-newBase>3) ? pos : 0; pendingMargin = resumeMargin(pos); pendingStartPaused=vodUserPaused;   // 保留用户暂停意图，后台恢复不能擅自续播
       playEpisode(pct); }
   }catch(e){} fromRecovery=false; recovering=false; }, (Date.now()-streamStartedAt<25000 ? 4000 : (recoverTimes<=2?600:0)) || Math.min(10000,600*Math.pow(2,recoverTimes-2)));
   // 刚起播没多久就断=源在这个位置还没下载够(提前EOF),立刻重试只会再撞一次;等4秒让P2P追上来。其余情况按指数退避   // 指数退避:别在引擎自愈期间高频重试制造新churn
@@ -979,7 +983,7 @@ function fallbackToTranscode(){ const ep=curEps[curEpIdx]; if(!player||!ep||tran
   const pos=vodBase+V.currentTime, pct=vodDur?Math.min(96,Math.max(curPct,Math.floor(pos/vodDur*100))):curPct;
   const newBase=vodDur?Math.floor(pct/100*vodDur):0;
   transcodeFallback.add(ep.channelId); console.warn('媒体解码失败，改用转码',ep.channelId);
-  fromRecovery=true; try{ pendingResumeAt=pos-newBase>3?pos:0; pendingMargin=resumeMargin(pos); playEpisode(pct); }finally{ fromRecovery=false; }
+  fromRecovery=true; try{ pendingResumeAt=pos-newBase>3?pos:0; pendingMargin=resumeMargin(pos); pendingStartPaused=vodUserPaused; playEpisode(pct); }finally{ fromRecovery=false; }
   return true; }
 let failedMediaSid='', failedMediaChannel='', failedMediaAt=0, failedMediaCount=0;
 function onMediaFailure(detail){

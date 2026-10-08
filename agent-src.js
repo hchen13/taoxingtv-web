@@ -1,4 +1,5 @@
 import Java from 'frida-java-bridge';
+import { javaNetwork, shutdownJavaNetwork } from './agent-workers.js';
 
 // 后台取流借用了 App 的 VodPlayActivity 作为原生回调对象。原版错误分支会
 // 弹 Toast 并调用 onBackPressed；这个 Activity 没有初始化播放器，二者都会
@@ -75,54 +76,45 @@ function dumpList(listVal, ChannelCls) {
 }
 
 rpc.exports = {
+  shutdownNetwork: shutdownJavaNetwork,
   dlPoster: function (pic, devPath) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url = CD.VODBASE_URL.value + pic + '?name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
-        resolve({ ret: VC.icBigFile(url, devPath, null, 0) });
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('posters', () => {
+      const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url = CD.VODBASE_URL.value + pic + '?name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
+      return { ret: VC.icBigFile(url, devPath, null, 0) };
+    });
   },
   dlPosterOld: function (pic, devPath) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url=CD.VODBASE_URL.value+'vod/pic/'+pic+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
-          '&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
-        resolve({ret:VC.icBigFile(url,devPath,null,0)});
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('posters', () => {
+      const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url=CD.VODBASE_URL.value+'vod/pic/'+pic+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
+        '&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
+      return {ret:VC.icBigFile(url,devPath,null,0)};
+    });
   },
   vodSearch: function (db, keywords, type, scope) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url = CD.VODSEARCH_URL.value + '?db='+db+'&keywords='+keywords+'&type='+(type||'all')+'&scope='+(scope||0)+'&name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
-        resolve(VC.icSearch(url));
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('metadata', () => {
+      const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url = CD.VODSEARCH_URL.value + '?db='+db+'&keywords='+keywords+'&type='+(type||'all')+'&scope='+(scope||0)+'&name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
+      return VC.icSearch(url);
+    });
   },
   // 电视首页“点播”使用旧 com.vod 目录；它的拼音索引与“环球剧场”不同。
   vodSearchOld: function (keywords) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url=CD.VODSEARCH_URL.value+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
-          '&androidid='+CD.g_mac.value+'&lang=cn&ver=408&keywords='+keywords+'&im=pinyin';
-        resolve(VC.icSearch(url));
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('metadata', () => {
+      const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url=CD.VODSEARCH_URL.value+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
+        '&androidid='+CD.g_mac.value+'&lang=cn&ver=408&keywords='+keywords+'&im=pinyin';
+      return VC.icSearch(url);
+    });
   },
   vodGetOld: function (path) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url=CD.VODBASE_URL.value+path+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
-          '&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
-        resolve(VC.icStaticDecode(url));
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('metadata', () => {
+      const CD=Java.use('com.vod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url=CD.VODBASE_URL.value+path+'?name='+CD.g_account.value+'&pass='+CD.g_password.value+
+        '&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
+      return VC.icStaticDecode(url);
+    });
   },
   vodUrls: function () {
     return new Promise((resolve, reject) => Java.perform(function () {
@@ -142,13 +134,11 @@ rpc.exports = {
   },
   // 用应用账号调 icStaticDecode 取任意 VOD 数据(pathUrl 不含 query)
   vodGet: function (pathUrl) {
-    return new Promise((resolve, reject) => Java.perform(function () {
-      try {
-        const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
-        const url = pathUrl + '?name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
-        resolve(VC.icStaticDecode(url));
-      } catch(e){ reject(''+(e.stack||e)); }
-    }));
+    return javaNetwork('metadata', () => {
+      const CD=Java.use('com.newvod.coredata.CoreData'); const VC=Java.use('dnet.VideoClient');
+      const url = pathUrl + '?name='+CD.g_account.value+'&pass='+CD.g_password.value+'&androidid='+CD.g_mac.value+'&lang=cn&ver=408';
+      return VC.icStaticDecode(url);
+    });
   },
   dump: function () {
     return new Promise((resolve, reject) => Java.perform(function () {

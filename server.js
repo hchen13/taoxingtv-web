@@ -10,6 +10,7 @@ const { pinyin } = require('pinyin-pro');
 const { DownloadQueue } = require('./download-queue');
 const { DeadPortRestartPolicy } = require('./stream-recovery');
 const { buildTranscodeArgs } = require('./stream-transcode');
+const { VodBuffer, TransportClock } = require('./vod-buffer');
 // 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
 { const _l=console.log.bind(console), _e=console.error.bind(console);
   const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
@@ -24,6 +25,7 @@ const CREDS_FILE = __dirname + '/creds.json';  // 本地保存的登录凭据(gi
 const PORT = process.env.PORT || 8090;
 const IDLE_MS = parseInt(process.env.IDLE_MS || '3600000', 10);  // 一小时内重新开页复用热引擎；模拟器空闲约占 1 GB 内存
 const FRIDA_BIN = '/data/local/tmp/frida-server';
+const VOD_BUFFER_MB = Math.max(0, Math.min(1024, Number(process.env.VOD_BUFFER_MB ?? 256) || 0));
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function adb(args, opts={}) { try { return execFileSync(ADB, args, {encoding:'utf8', timeout: opts.timeout||15000}); } catch(e){ return ''; } }
@@ -97,6 +99,7 @@ function queueStop(token){ streamMutex = streamMutex.then(async()=>{ if(current.
 function cleanupCurrent(){
   const tok=current.token;
   if(current.ff){ try{current.ff.kill('SIGKILL');}catch(e){} }
+  if(current.buffer) current.buffer.destroy();
   if(current.res && !current.res.writableEnded){ try{current.res.end();}catch(e){} }
   if(current.port){ queueStop(tok); adb(['forward','--remove','tcp:'+current.port]); }
   current={token:tok, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
@@ -166,10 +169,15 @@ async function bootEmulator(){
         }
       }
       state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
-    } catch(e){ state='off'; try{ if(session) await session.detach(); }catch(_){} session=null; script=null;
+    } catch(e){ state='off'; await detachAgent(); session=null; script=null;
       bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
   })(); return bootPromise;
+}
+async function detachAgent(){
+  const attachedScript=script, attachedSession=session;
+  try{ if(attachedScript) await attachedScript.exports.shutdownNetwork(); }catch(e){}
+  try{ if(attachedSession) await attachedSession.detach(); }catch(e){}
 }
 async function attach(){
   const dev=await frida.getUsbDevice(); let app=null;
@@ -179,7 +187,7 @@ async function attach(){
   session.detached.connect((reason)=>{
     // 片尾源先断、原生 App 随后崩溃时，onSegEnd 正在续接。保留 HTTP 响应和已缓冲的视频，
     // 让续接流程冷启动引擎继续核对后续内容；直接 cleanup 会把断流伪装成已播完。
-    if(current.splicing && current.res && !current.res.writableEnded) console.log('[engine] 原生会话退出，保留点播续接与客户端缓冲');
+    if((current.splicing || current.buffer) && current.res && !current.res.writableEnded) console.log('[engine] 原生会话退出，保留点播续接与客户端缓冲');
     else cleanupCurrent();
     script=null; session=null;
     if(state==='ready'){ state='off'; needColdRestart=true; console.log('[engine] session dropped ('+reason+') -> off; 下次冷重启app修复P2P核心'); } });
@@ -201,7 +209,7 @@ async function attach(){
 async function ensureReady(){ lastActivity=Date.now(); if(state==='ready'&&script&&emulatorRunning())return; await bootEmulator(); }
 async function shutdownEmulator(reason){ if(state==='off')return; state='off'; console.log('[engine] shutting down:',reason);
   cleanupCurrent();
-  try{ if(session) await session.detach(); }catch(e){} script=null; session=null;
+  await detachAgent(); script=null; session=null;
   adb(['emu','kill']);
   for(let i=0;i<20 && emulatorRunning();i++){ await sleep(500); }  // 等模拟器真正退出,避免重启时新进程撞上正在死亡的模拟器
   bootStep=''; console.log('[engine] off (内存已释放)'); }
@@ -323,7 +331,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         if(deadPortCount>0 && state==='ready'){
           if(shouldRestartAfterDeadPort(deadPortCount, nearEndVod)){
             console.log('['+label+'] 客户端已放弃且死端口持续出现 -> 冷重启App自愈');
-            needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+            needColdRestart=true; await detachAgent();
           } else console.log('['+label+'] 坏端口未达到自愈门限或处于重启冷却期');
         }
         return;
@@ -337,7 +345,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           } else {
             console.log('['+label+'] 连续坏端口,P2P核心疑似卡死 -> 触发冷重启App');
             restarting=true;
-            needColdRestart=true; try{ if(session) await session.detach(); }catch(e){}
+            needColdRestart=true; await detachAgent();
           }
         }
         try{ res.status(502).end('播放启动失败:'+(restarting?'P2P核心卡死,正在自动重启,请稍候重试':'多次取流均无数据,请稍候重试')); }catch(e){}
@@ -345,6 +353,14 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       }
 
       current={ token:myToken, chid:label, port:myPort, ff, res, ended:false, ffExited:false, starting:false, sid:mySid };
+      let reserve=null;
+      if(!isLive && vod && VOD_BUFFER_MB>0 && !mySid.startsWith('download-')){
+        try{ reserve=new VodBuffer({directory:pathMod.join(__dirname,'cache','playback'),capacity:Math.floor(VOD_BUFFER_MB*1024*1024)}); }
+        catch(e){ console.error('[vod buffer] 预缓存不可用，继续直接播放:',e.message); }
+      }
+      current.buffer=reserve;
+      if(reserve) reserve.on('error',e=>{ console.error('[vod buffer]',e.message); res.destroy(e); });
+      const deliveryClock=new TransportClock();
       deadPortRestartPolicy.succeeded();
       coldStreamStarted=true;
       curBuf=0; curPaused=false; curBufAt=0; curPosAbs=0;
@@ -353,9 +369,9 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       res.setHeader('Content-Type','video/mp2t');
       let lastBump=0;
       let outBytes=0;
-      if(buffered && buffered.length){ for(const c of buffered){ try{ res.write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
+      if(buffered && buffered.length){ for(const c of buffered){ try{ (reserve||res).write(c); }catch(e){} } }  // 补发健康门限期间缓冲的首包(含PAT/PMT),不丢头
       // ——— 源断了由服务端无缝续接,客户端全程只看到一条不间断的流 ———
-      // 源连接结束(真片尾之外)时:算出已经送出多少内容,重新取流并用 -ss 跳过重叠部分、-output_ts_offset 接续时间戳,
+      // 源连接结束(真片尾之外)时:算出已经产出多少内容(包括磁盘预缓存),重新取流并用 -ss 跳过重叠部分、-output_ts_offset 接续时间戳,
       // 继续写进同一个 HTTP 响应,前端不重建播放器、不丢已缓冲内容。
       // (根治晚到 stop 之后,源断开应当很少见;续接是兜底,所以必须可靠:有首字节门限、失败重试、全程有日志。)
       const durSec = (vod && vod.dur>0) ? vod.dur : 0;
@@ -364,12 +380,13 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       let bufPaused=false, probeStartedAt=0, probeBytes=0, nextProbeAt=Date.now()+30000, needDataAt=Date.now();
       let exitedDuringSplice=null;
       let wantSplice = false;   // 停滞检测主动 SIGKILL 当前段并要求续接时置真(否则 SIGKILL 一律视为我们主动拆流,不续接)
+      const endOutput=()=>{ if(reserve){ if(!reserve.writableEnded&&!reserve.destroyed)reserve.end(); }else res.end(); };
       const readProgress = (d)=>{ const m=(''+d).match(/out_time_us=(\d+)/g); if(m&&m.length){ const v=parseInt(m[m.length-1].split('=')[1],10); if(!isNaN(v)) segOut = v/1e6; } };
       const bufferedAhead = (now)=>Math.max(curBuf,
-        curPosAbs>0 && now-curBufAt<10000 && segOut>0
-          ? Math.max(0,segStartAbs+deliveredSec+segOut-curPosAbs) : 0);
-      // 实测 stdout.pause() 与 pipe(res) 配合时并未持续限流：状态显示已节流，浏览器缓冲仍涨到 500 秒以上。
-      // 暂停 ffmpeg 进程才能真正限制 MSE 缓冲；定期 SIGCONT 探测源健康。
+        curPosAbs>0 && now-curBufAt<10000
+          ? Math.max(0,segStartAbs+(reserve?deliveryClock.seconds:deliveredSec+segOut)-curPosAbs) : 0);
+      // 无磁盘预缓存时保留原来的限流路径：stdout.pause() 与 pipe(res) 配合未能持续限流，
+      // 需暂停 ffmpeg 进程限制 MSE 缓冲，并定期 SIGCONT 探测源健康。
       const pauseSource = (proc)=>{ if(proc!==ff || bufPaused) return;
         if(proc.kill('SIGSTOP')){ bufPaused=true; current.throttled=true; }
       };
@@ -391,8 +408,8 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           }
         });
         proc.stderr.on('data',d=>{ if(proc===ff) readProgress(d); });
-        proc.stdout.pipe(res,{end:false});          // 不让某一段结束就把响应关掉
-        proc.on('exit',(code,sig)=>{ onSegEnd(proc,sig); });
+        proc.stdout.pipe(reserve||res,{end:false}); // 浏览器缓冲满时仅停投递，原生继续填磁盘预缓存
+        proc.on('close',(code,sig)=>{ onSegEnd(proc,sig); }); // stdout 排空后才续接或结束，不丢尾包
         proc.on('error',(e)=>{ console.error('[ff spawn err]',e&&e.message); if(!splicing) onSegEnd(proc,null); });
       };
 
@@ -419,7 +436,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         const confirmedEnd=emptySplices>=3 || (current.token===myToken && current.ended) || sourcePastCatalogEnd;
         if(isLive || !vod || !vod.mkPlay || confirmedEnd){
           if(!isLive && current.token===myToken && confirmedEnd) endedVod={sid:mySid,at:resumeAbs};
-          finished=true; try{ res.end(); }catch(e){}
+          finished=true; try{ endOutput(); }catch(e){}
           console.log('['+label+'] 结束于 '+resumeAbs.toFixed(0)+'s'+(durSec?('/'+durSec+'s'):'')+(emptySplices>=3?'(连续取不到内容)':''));
           return;
         }
@@ -457,7 +474,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
                 if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; try{cand.kill('SIGKILL');}catch(e){} return; }
                 if(ok){ console.log('['+label+'] 续接成功 port '+r.port+' 第'+sub+'次,断开到出数据 '+((Date.now()-t0)/1000).toFixed(1)+'s'); break; }
                 console.log('['+label+'] 续接 port '+r.port+' '+(firstByteMs/1000)+'秒未出数据,同端口第'+sub+'次');
-                try{ cand.stdout.unpipe(res); cand.kill('SIGKILL'); }catch(e){}
+                try{ cand.stdout.unpipe(reserve||res); cand.kill('SIGKILL'); }catch(e){}
                 if(sub<2) await sleep(2500);
               }
             }catch(e){ failure=e; }
@@ -474,7 +491,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           if(finished) return;
         }catch(e){
           console.error('['+label+'] 续接失败:', e&&(e.message||e));
-          finished=true; try{ res.end(); }catch(_){}   // 让前端按老路走恢复
+          finished=true; try{ endOutput(); }catch(_){} // 先耗尽已有预缓存，再交给前端恢复
         }finally{
           splicing=false; if(current.token===myToken) current.splicing=false;
           const exited=exitedDuringSplice; exitedDuringSplice=null;
@@ -483,19 +500,38 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
       }
 
       wire(ff);
+      if(reserve) reserve.relay(res,d=>{
+        deliveryClock.push(d);
+        if(current.token!==myToken)return;
+        // 每个传输块检查已送达的时间轴，避免本地缓存瞬间灌满浏览器内存。
+        const now=Date.now(), high=curPaused&&now-curBufAt<10000?180:120;
+        if(bufferedAhead(now)>high) reserve.setDeliveryPaused(true);
+      }).catch(e=>{ console.error('[vod buffer relay]',e.message); res.destroy(e); });
 
       // 播放时留约100-120秒、暂停时留约160-180秒。源/端口恢复常耗数十秒，
       // 旧的56-60秒缓冲在1.25倍速下不够撑过一次失败续接。
       const throttle = isLive ? null : setInterval(()=>{
         if(current.token!==myToken){ clearInterval(throttle); return; }
         try{
-          if(splicing || finished || wantSplice) return;
+          if(!reserve && (splicing || finished || wantSplice)) return;
           const now=Date.now(), paused=curPaused && now-curBufAt<10000;
           const high=paused?180:120, low=paused?160:100;
           // MSE 追加常落后于网络接收。只看 V.buffered 会在已发送数分钟数据后才背压；
-          // ffmpeg 的 out_time 是已产出的片长(不含 output_ts_offset)，可提前限制在途内容。
+          // 磁盘缓存路径使用投递时钟；直传路径使用 ffmpeg out_time，提前限制在途内容。
           const ahead=bufferedAhead(now);
           current.ahead=Math.round(ahead*10)/10;
+          if(reserve){
+            if(reserve.deliveryPaused && ahead<low) reserve.setDeliveryPaused(false);
+            else if(ahead>high) reserve.setDeliveryPaused(true);
+            current.throttled=reserve.deliveryPaused;
+            current.prefetchPaused=reserve.backpressured;
+            if(reserve.backpressured) needDataAt=now;
+            else if(!splicing && !finished && !wantSplice && current.lastData && now-Math.max(current.lastData,needDataAt)>20000){
+              console.log('['+label+'] 预取20秒未供数，保留 '+(reserve.pendingBytes/1048576).toFixed(1)+'MiB 缓存并续接');
+              wantSplice=true; ff.kill('SIGKILL');
+            }
+            return;
+          }
           if(probeStartedAt){
             if(now-probeStartedAt>15000){
               console.log('['+label+'] 节流探测15秒无数据,缓冲 '+curBuf.toFixed(0)+'s -> 提前续接');
@@ -521,7 +557,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         }catch(e){}
       }, 1000);
       // 拆掉正在播放的流(用户seek/切集换流、关页面时走这里)。
-      const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false,sid:null};
+      const teardown=()=>{ finished=true; if(throttle)clearInterval(throttle); if(reserve)reserve.destroy(); try{ff.kill('SIGKILL');}catch(e){} if(current.token===myToken){ adb(['forward','--remove','tcp:'+myPort]); current={token:myToken,chid:null,port:null,ff:null,ended:false,ffExited:false,starting:false,sid:null};
         queueStop(myToken); } };   // 排队 stop 时再次核对 token(见 queueStop):若此后已有新流启动,这个 stop 作废,否则会把新流的 P2P 会话停掉
       res.on('close',teardown); res.on('error',teardown);
     } catch(e){ console.error('['+label+' err]',e&&(e.stack||e.message||e)); try{res.status(503).end(''+(e.message||e));}catch(_){}
@@ -543,11 +579,12 @@ app.use((req,res,next)=>{
 app.use(express.json());
 app.get('/', (req,res)=>{ res.set('Cache-Control','no-cache, no-store, must-revalidate'); res.sendFile(__dirname+'/public/index.html'); });
 app.get('/mpegts.js', (req,res)=>res.sendFile(__dirname+'/node_modules/mpegts.js/dist/mpegts.js'));
-app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing}));
+const streamAlive=()=> (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing || (current.buffer?.pendingBytes>0);
+app.get('/api/status', (req,res)=>res.json({state, step:bootStep, playing:current.chid, ended:current.ended, alive:streamAlive()}));
 app.post('/api/wake', (req,res)=>{ lastActivity=Date.now(); bootEmulator().catch(()=>{}); res.json({state, step:bootStep}); });
 app.post('/api/heartbeat', (req,res)=>{ lastActivity=Date.now(); res.json({ok:true, state}); });
 // 流状态:前端用来区分"临时卡顿(alive,等就好)"vs"真结束(ended)"vs"断流(!alive)"
-app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, endedSid:endedVod.sid, endedAt:endedVod.at, alive: (!!current.ff && !current.ffExited) || !!current.starting || !!current.splicing, feeding: (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, sid:current.sid, starting:!!current.starting, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing }));   // feeding:源近3秒在出数(或缓冲已满被节流)=还活着
+app.get('/api/streamstate', (req,res)=>res.json({ ended:current.ended, endedSid:endedVod.sid, endedAt:endedVod.at, alive:streamAlive(), feeding: (current.buffer?.pendingBytes>0) || (!!current.ff && !current.ffExited && ((Date.now()-(current.lastData||0) < 3000) || !!current.throttled)), chid:current.chid, sid:current.sid, starting:!!current.starting, curBuf, ahead:current.ahead, paused:curPaused, throttled:!!current.throttled, splicing:!!current.splicing, cacheBytes:current.buffer?.pendingBytes||0, cacheCapacityBytes:current.buffer?.capacity||0, prefetchPaused:!!current.prefetchPaused, fetchedBytes:current.outTotal||0 }));
 app.get('/api/buf', (req,res)=>{ if(current.sid && req.query.sid===current.sid){ curBuf=Math.max(0,parseFloat(req.query.d)||0); curPaused=req.query.p==='1'; curPosAbs=Math.max(0,parseFloat(req.query.pos)||0); curBufAt=Date.now(); } res.json({ok:true}); });  // 只接受当前流的缓冲量，旧页面/旧流不能误节流新流
 
 // —— 登录(网页UI,全后台;用户永不碰模拟器)——
@@ -572,7 +609,7 @@ app.post('/api/login', async (req,res)=>{
     await script.exports.saveCreds(account, password);   // 写入 App 的 SharedPreferences
     await sleep(800);                                     // 等 apply() 落盘
     needColdRestart = true;                               // 冷重启 App 走它自带的启动自动登录+激活
-    try { if (session) await session.detach(); } catch(e){}
+    await detachAgent();
     await sleep(1000);
     await bootEmulator();
     let st = { activated:false };
@@ -598,7 +635,7 @@ app.post('/api/logout', async (req,res)=>{
   try { await ensureReady();
     await script.exports.saveCreds('', '');   // 清空 prefs 凭据
     try { fs.unlinkSync(CREDS_FILE); } catch(e){}
-    needColdRestart = true; try { if (session) await session.detach(); } catch(e){}
+    needColdRestart = true; await detachAgent();
     catalog = null; vodCache.clear(); vodBase=null; res.json({ ok:true });
   } catch(e){ res.status(500).json({ error: ''+(e.message||e) }); }
 });
@@ -773,9 +810,10 @@ function mergeSearchResults(lists, q, initials, isName){
     if(!group.sources.some(s=>s.type===f.type&&s.playid===f.playid)) group.sources.push(f);
   }
   const films=[...grouped.values()];
-  // 同片多源时优先环球剧场：实测第二季起播供数更快；电视点播仍可在详情页切换。
+  // 同片多源时默认与电视首页“点播”一致。Silo 两季与黄石的持续取流对照
+  // 均为电视点播更快；环球剧场仍保留为手动可选片源和独有节目的来源。
   for(const f of films){
-    f.sources.sort((a,b)=>(a.type==='new'?0:1)-(b.type==='new'?0:1));
+    f.sources.sort((a,b)=>(a.type==='old'?0:1)-(b.type==='old'?0:1));
     Object.assign(f,{pic:f.sources[0].pic,remark:f.sources[0].remark,playid:f.sources[0].playid,type:f.sources[0].type});
   }
   const baseOrder=new Map();
@@ -928,6 +966,7 @@ async function gracefulExit(sig){
   console.log('['+sig+'] 退出:保存下载进度并释放当前流');
   try{ await downloads.close(); }catch(e){ console.error('[downloads] 退出时保存失败',e); }
   try{ cleanupCurrent(); }catch(e){}
+  await detachAgent();
   process.exit(0);
 }
 process.on('SIGINT', ()=>gracefulExit('SIGINT'));
