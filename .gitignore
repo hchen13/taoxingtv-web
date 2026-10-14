@@ -15,6 +15,7 @@ vod-root.xml
 # 本地凭据(UI 登录后持久化在此,永不进仓库)
 creds.json
 .env
+direct-network.json
 
 # 系统
 .DS_Store

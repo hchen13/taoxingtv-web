@@ -1,5 +1,5 @@
 📦
-494822 /agent-src.js
+492825 /agent-src.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -13750,68 +13750,55 @@ var require_agent_src = __commonJS({
     init_node_globals();
     init_frida_java_bridge();
     init_agent_workers();
+    var callbackState = { last: 0, ended: 0, count: 0 };
+    var playbackCallbacks = {
+      live: { className: "com.wys.iptvgo.activity.TimeShiftPlayActivity", errorMethod: "lambda$tellMessage$2$TimeShiftPlayActivity" },
+      vod: { className: "com.newvod.activity.VodPlayActivity", errorMethod: "lambda$tellMessage$1$VodPlayActivity" }
+    };
     frida_java_bridge_default.perform(() => {
-      try {
-        const Activity = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
-        const tell = Activity.tellMessage.overload("int");
-        tell.implementation = function(code3) {
-          send({ tell: code3 });
-        };
+      for (const [kind, entry] of Object.entries(playbackCallbacks)) {
         try {
-          const errorUi = Activity["lambda$tellMessage$1$VodPlayActivity"].overload("java.lang.String");
-          errorUi.implementation = function(message) {
-            send({ vodCallbackWarning: String(message) });
+          const Activity = frida_java_bridge_default.use(entry.className);
+          Activity.tellMessage.overload("int").implementation = function(code3) {
+            callbackState.last = code3;
+            callbackState.count++;
+            if (code3 === 2) callbackState.ended = 1;
+            send({ tell: code3, playbackKind: kind });
           };
+          try {
+            Activity[entry.errorMethod].overload("java.lang.String").implementation = function(message) {
+              send({ playbackCallbackWarning: kind + ": " + String(message) });
+            };
+          } catch (e) {
+            send({ playbackCallbackWarning: kind + " \u9519\u8BEF\u63D0\u793A\u9632\u62A4: " + String(e) });
+          }
+          entry.guarded = true;
+          send({ playbackCallbackGuard: kind });
         } catch (e) {
-          send({ vodCallbackGuardError: "\u9519\u8BEF\u63D0\u793A\u9632\u62A4: " + String(e) });
+          send({ playbackCallbackGuardError: kind + ": " + String(e) });
         }
-        send({ vodCallbackGuard: true });
-      } catch (e) {
-        send({ vodCallbackGuardError: String(e) });
       }
     });
-    var CB_DEX_B64 = "ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA";
-    var CB_INST = null;
-    var CB_NATIVE = null;
-    var CB_LOADER = null;
-    var CB_MODE = "none";
-    var CB_FAIL = "";
-    var VOD_CB = null;
-    var vodCbPending = null;
-    function ensureVodCB() {
-      if (VOD_CB) return Promise.resolve(VOD_CB);
-      if (vodCbPending) return vodCbPending;
-      vodCbPending = new Promise((resolve, reject) => frida_java_bridge_default.perform(() => {
+    function ensurePlaybackCB(kind) {
+      const entry = playbackCallbacks[kind];
+      if (entry.instance) return Promise.resolve(entry.instance);
+      if (entry.pending) return entry.pending;
+      entry.pending = new Promise((resolve, reject) => frida_java_bridge_default.perform(() => {
         frida_java_bridge_default.scheduleOnMainThread(() => {
           try {
-            const Activity = frida_java_bridge_default.use("com.newvod.activity.VodPlayActivity");
-            VOD_CB = frida_java_bridge_default.retain(frida_java_bridge_default.cast(Activity.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
-            resolve(VOD_CB);
+            if (!entry.guarded) throw new Error("\u540E\u53F0\u64AD\u653E\u56DE\u8C03\u9632\u62A4\u672A\u5C31\u7EEA");
+            const Activity = frida_java_bridge_default.use(entry.className);
+            entry.instance = frida_java_bridge_default.retain(frida_java_bridge_default.cast(Activity.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
+            resolve(entry.instance);
           } catch (e) {
-            vodCbPending = null;
-            reject(new Error("App \u539F\u751F\u70B9\u64AD\u56DE\u8C03\u521B\u5EFA\u5931\u8D25: " + (e.stack || e)));
+            reject(new Error("App \u539F\u751F\u64AD\u653E\u56DE\u8C03\u521B\u5EFA\u5931\u8D25: " + (e.stack || e)));
           }
         });
-      }));
-      return vodCbPending;
-    }
-    function ensureCB() {
-      if (CB_INST) return CB_INST;
-      try {
-        const B64 = frida_java_bridge_default.use("android.util.Base64");
-        const BB = frida_java_bridge_default.use("java.nio.ByteBuffer");
-        const IMDCL = frida_java_bridge_default.use("dalvik.system.InMemoryDexClassLoader");
-        const bytes = B64.decode(CB_DEX_B64, 0);
-        CB_LOADER = IMDCL.$new(BB.wrap(bytes), frida_java_bridge_default.use("android.app.ActivityThread").currentApplication().getClassLoader());
-        const f = frida_java_bridge_default.ClassFactory.get(CB_LOADER);
-        CB_NATIVE = f.use("com.txtv.NativeCB");
-        CB_INST = frida_java_bridge_default.retain(frida_java_bridge_default.cast(CB_NATIVE.$new(), frida_java_bridge_default.use("dnet.ITellMessage")));
-        CB_MODE = "dex";
-        return CB_INST;
-      } catch (e) {
-        CB_FAIL = "" + (e.message || e);
-        throw new Error("\u5B89\u5168\u56DE\u8C03\u52A0\u8F7D\u5931\u8D25: " + CB_FAIL);
-      }
+      })).catch((e) => {
+        entry.pending = null;
+        throw e;
+      });
+      return entry.pending;
     }
     function dumpList(listVal, ChannelCls) {
       if (!listVal) return [];
@@ -13964,7 +13951,7 @@ var require_agent_src = __commonJS({
         }));
       },
       vodPlay: function(channelId, ip, port, percent, mode) {
-        return ensureVodCB().then((cb) => new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+        return ensurePlaybackCB("vod").then((cb) => new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
           let step = "start";
           try {
             step = "stopPrev";
@@ -13987,23 +13974,26 @@ var require_agent_src = __commonJS({
         })));
       },
       play: function(chid, startTime) {
-        return new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
+        return ensurePlaybackCB("live").then((cb) => new Promise((resolve, reject) => frida_java_bridge_default.perform(function() {
           let step = "start";
           try {
             step = "stopPrev";
+            const VC = frida_java_bridge_default.use("dnet.VideoClient");
             try {
-              frida_java_bridge_default.use("dnet.VideoClient").playbackStop();
+              VC.playbackStop();
             } catch (e) {
             }
-            step = "cb";
-            const cb = ensureCB();
+            try {
+              VC.vodStop();
+            } catch (e) {
+            }
             step = "playbackStart";
-            const port = frida_java_bridge_default.use("dnet.VideoClient").playbackStart(chid, startTime | 0, 2147483647, cb, 0);
-            resolve({ port, callback: CB_MODE });
+            const port = VC.playbackStart(chid, startTime | 0, 2147483647, cb, 0);
+            resolve({ port, callback: "activity" });
           } catch (e) {
             reject("at[" + step + "]: " + (e && (e.stack || e.message || e) || "unknown"));
           }
-        }));
+        })));
       },
       // —— 登录相关(网页UI登录,全后台,用户不碰模拟器)——
       loginState: function() {
@@ -14078,22 +14068,15 @@ var require_agent_src = __commonJS({
           resolve(out);
         }));
       },
-      // 轮询原生回调状态(替代从原生线程 send() 回JS:那条路径正是SIGSEGV来源)。reset=true 时清零,供每次播放开始前重置
+      // 保留诊断接口；直播、点播各自由 APK 注册的原生类承接。
       pollTell: function(reset) {
-        return new Promise((resolve) => frida_java_bridge_default.perform(function() {
-          try {
-            if (!CB_NATIVE) return resolve({ mode: CB_MODE, fail: CB_FAIL, last: 0, ended: 0, count: 0 });
-            const r = { mode: CB_MODE, fail: CB_FAIL, last: CB_NATIVE.last.value, ended: CB_NATIVE.endedFlag.value, count: CB_NATIVE.count.value };
-            if (reset) {
-              CB_NATIVE.last.value = 0;
-              CB_NATIVE.endedFlag.value = 0;
-              CB_NATIVE.count.value = 0;
-            }
-            resolve(r);
-          } catch (e) {
-            resolve({ mode: CB_MODE, err: "" + (e.message || e) });
-          }
-        }));
+        const result = { mode: Object.values(playbackCallbacks).some((entry) => entry.instance) ? "activity" : "none", ...callbackState };
+        if (reset) {
+          callbackState.last = 0;
+          callbackState.ended = 0;
+          callbackState.count = 0;
+        }
+        return result;
       },
       // 引擎真实就绪判据(原生:icChart挂表+icAuth授权成功后 activatedTime=毫秒时间戳;默认0/失败-1)。activatedTime>0 且频道已加载 才算引擎挂表+授权完成、可安全 vodStart。替代冷启动盲等12s——盲等常常还没授权就播,vodStart直接给死端口/-1000
       engineReady: function() {

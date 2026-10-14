@@ -11,6 +11,7 @@ const { DownloadQueue } = require('./download-queue');
 const { DeadPortRestartPolicy } = require('./stream-recovery');
 const { buildTranscodeArgs } = require('./stream-transcode');
 const { VodBuffer, TransportClock } = require('./vod-buffer');
+const { emulatorNetworkEnv } = require('./direct-network');
 // 日志带本地时间戳:排查"何时断源/续接花了多久/前端何时重取"必须有时序
 { const _l=console.log.bind(console), _e=console.error.bind(console);
   const st=()=>{ const d=new Date(); return d.toTimeString().slice(0,8)+'.'+String(d.getMilliseconds()).padStart(3,'0'); };
@@ -117,7 +118,7 @@ async function bootEmulator(){
   bootPromise=(async()=>{ state='booting';
     try {
       if(!emulatorRunning()){ bootStep='启动模拟器(全新冷启动)…';
-        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore'});
+        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore',env:emulatorNetworkEnv()});
         await new Promise((resolve,reject)=>{ p.once('spawn',resolve); p.once('error',reject); });
         p.unref();   // -no-snapshot:每次全新冷启动,不加载/保存快照,不继承上次残留状态(登录仍在磁盘userdata里,会自动登录)
         adb(['wait-for-device'],{timeout:120000}); }
@@ -195,12 +196,12 @@ async function attach(){
   // 捕获原生播放回调 tellMessage:i==2=真结束(片尾);其他为错误码
   script.message.connect(m=>{
     if(m.type==='error'){ console.error('[agent]',m.description); return; }
-    if(m.type==='send' && m.payload && m.payload.vodCallbackGuard) console.log('[agent] 后台点播回调防护已安装');
-    if(m.type==='send' && m.payload && m.payload.vodCallbackGuardError) console.error('[agent] 点播回调防护安装失败:',m.payload.vodCallbackGuardError);
-    if(m.type==='send' && m.payload && m.payload.vodCallbackWarning) console.log('[agent] 已忽略后台点播错误提示:',m.payload.vodCallbackWarning);
+    if(m.type==='send' && m.payload && m.payload.playbackCallbackGuard) console.log('[agent] 后台播放回调防护已安装:',m.payload.playbackCallbackGuard);
+    if(m.type==='send' && m.payload && m.payload.playbackCallbackGuardError) console.error('[agent] 播放回调防护安装失败:',m.payload.playbackCallbackGuardError);
+    if(m.type==='send' && m.payload && m.payload.playbackCallbackWarning) console.log('[agent] 后台播放回调提示:',m.payload.playbackCallbackWarning);
     if(m.type==='send' && m.payload && typeof m.payload.tell==='number'){
       const t=m.payload.tell;
-      if(t===2){ current.ended=true; console.log('[tell] 播放到结尾(tell=2)'); }
+      if(t===2 && m.payload.playbackKind==='vod'){ current.ended=true; console.log('[tell] 播放到结尾(tell=2)'); }
       else if([4,100,101,102,103].includes(t)){ console.log('[tell] 错误码',t); }
     }
   });

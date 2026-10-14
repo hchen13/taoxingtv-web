@@ -742,7 +742,7 @@ function clearWaitTimer(){ if(waitTimer){ clearTimeout(waitTimer); waitTimer=nul
 function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
   playbackStoppedForDownload=false;
   const streamUrl=new URL(url,location.href); streamUrl.searchParams.set('sid',activeStreamSid); url=streamUrl.href;
-  isLiveNow=isLive; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); clearWaitTimer(); lastPlayedTime=0; switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
+  isLiveNow=isLive; livePauseStartedAt=0; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); clearWaitTimer(); lastPlayedTime=0; switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
   if(!isLive && pendingStartPaused) vodUserPaused=true;  // 恢复保存的暂停状态；解码器自行暂停不等于用户暂停
   $('hint').style.display='none'; $('ptitle').textContent=title; $('load').classList.add('show'); $('loadtx').textContent='正在连接…';
   if(inDrawer()) setSide(true);   // 抽屉模式(横屏手机/全屏中):一开始播放就把抽屉收起来
@@ -782,7 +782,8 @@ STAGE.addEventListener('mousemove',flashUI);
 $('pctl').addEventListener('mousemove',e=>e.stopPropagation());
 $('pctl').addEventListener('touchstart',()=>flashUI(),{passive:true});   // 手机:碰到控制栏就续显
 let livePauseStartedAt=0;
-V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui'); if(player&&isLiveNow)livePauseStartedAt=Date.now(); });
+V.addEventListener('pause',()=>{ if(player)STAGE.classList.add('ui');
+  if(player&&isLiveNow&&!V.ended&&!V.error&&!switching&&!recovering)livePauseStartedAt=Date.now(); });
 // —— 单击暂停 / 双击全屏 ——
 let clickTimer=null;
 STAGE.addEventListener('click',e=>{ if(e.target.closest('.pctl')||e.target.closest('.detail')||e.target.closest('.ptitle')||e.target.closest('.sideToggle'))return;
@@ -829,14 +830,14 @@ function togglePP(){ if(!player)return; if(V.paused){
     vodUserPaused=false; pendingStartPaused=false;
     const ahead=V.buffered.length?V.buffered.end(V.buffered.length-1)-V.currentTime:0;
     // 直播暂停太久后 MSE 会积满旧内容；从旧位置续播可能导致音画异常或反复缓冲。
-    // 超出直播延迟窗口就重新取当前流，短暂停仍可从原处继续。
-    if(isLiveNow && ((livePauseStartedAt&&Date.now()-livePauseStartedAt>30000)||ahead>30)){
+    // 断流后播完的有限缓存不能重播；短暂停且流仍有效才从原处继续。
+    if(isLiveNow && (V.ended||V.error||(livePauseStartedAt&&Date.now()-livePauseStartedAt>30000)||ahead>30)){
       startPlay(window.playTitle||$('ptitle').textContent,window.curUrl,true); $('loadtx').textContent='回到直播…'; livePauseStartedAt=0; return;
     }
     V.play();
   }else { vodUserPaused=!isLiveNow; if(pendingResumeAt) pendingStartPaused=vodUserPaused; V.pause(); } }
 $('ppBtn').onclick=togglePP;
-V.addEventListener('play',()=>{ if(!pendingResumeAt) vodUserPaused=false; $('ppBtn').textContent='⏸'; });
+V.addEventListener('play',()=>{ if(!pendingResumeAt) vodUserPaused=false; if(isLiveNow)livePauseStartedAt=0; $('ppBtn').textContent='⏸'; });
 V.addEventListener('pause',()=>{ // 也接住系统媒体键的暂停；换流、预缓冲和解码错误触发的暂停不改变用户意图。
   if(player&&!isLiveNow&&!V.error&&!V.ended&&!switching&&!recovering&&!pendingResumeAt) vodUserPaused=true;
   $('ppBtn').textContent='▶'; if(curFilm&&!isLiveNow)saveState(); });
@@ -962,6 +963,7 @@ function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自�
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); STAGE.classList.add('ui'); if(player){try{player.destroy()}catch(e){}player=null;} } }
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
+  if(isLiveNow&&livePauseStartedAt) return;   // 真正的用户暂停留到手动续播；断流的自动 pause 不记作用户暂停。
   const now=Date.now(); recoverTimes=(now-lastRecover<30000)?recoverTimes+1:1; lastRecover=now;
   recoverPos = isLiveNow?0:Math.max(pendingResumeAt||0, vodBase+V.currentTime);
   if(recoverTimes>14){   // 退避重试约2分钟仍不行才放弃(服务端遇到坏引擎会冷重启自愈,约需40-60秒,必须等得起)
@@ -1002,7 +1004,9 @@ function onMediaFailure(detail){
 V.addEventListener('error', ()=>{ if(!isLiveNow && V.error && V.error.code===4 && fallbackToTranscode())return;
   if(!recovering && !switching) onMediaFailure('video error'); });   // 重复解码错误改走转码,并记录错误码以便区分源故障
 V.addEventListener('ended', async ()=>{   // 浏览器播完可能只是原生进程断了；服务端确认片尾后才切集。
-  if(isLiveNow||!curFilm||!vodDur||recovering||switching) return;
+  if(!player||recovering||switching) return;
+  if(isLiveNow){ doRecover(); return; }   // 直播没有片尾：旧缓存用完就重取当前直播，不能停在同一段反复播放。
+  if(!curFilm||!vodDur) return;
   const sid=activeStreamSid;
   try{ const st=await jget('api/streamstate');
     if(sid!==activeStreamSid||recovering||switching) return;

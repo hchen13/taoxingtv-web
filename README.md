@@ -37,6 +37,10 @@ localhost:8090 (也支持 /TXTV/ 路径)
 - **ffmpeg** 为点播优先只转封装,浏览器不支持源编码时才用 VideoToolbox 转码；直播继续转码,由 `mpegts.js` 播放。
 - 登录 = 用 Frida 把账号密码写进 APP 的 SharedPreferences,重启 APP 走它自带的启动自动登录+激活流程。
 
+## 代理与直连
+
+服务器可以留在当前 Mac，局域网设备继续访问同一个 `:8090` 地址。视频 P2P 节点会动态变化，固定 IP 表无法覆盖所有节目。macOS 可选择只把本项目模拟器的外连绑定到物理网卡，无需修改 Clash；也可由用户在代理中按实际取流进程分流。配置方法、回退方式与已识别源地址见 [本机直连与视频源清单](docs/direct-network-and-sources.md)。
+
 ## 环境要求
 
 - **macOS(Apple Silicon 推荐)**、Node 18+、`ffmpeg`(`brew install ffmpeg`)

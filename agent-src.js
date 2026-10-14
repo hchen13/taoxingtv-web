@@ -1,67 +1,50 @@
 import Java from 'frida-java-bridge';
 import { javaNetwork, shutdownJavaNetwork } from './agent-workers.js';
 
-// 后台取流借用了 App 的 VodPlayActivity 作为原生回调对象。原版错误分支会
-// 弹 Toast 并调用 onBackPressed；这个 Activity 没有初始化播放器，二者都会
-// 让整个 App 崩溃。模拟器专供后台取流，所有该类的通知都交给服务端处理。
+const callbackState = { last: 0, ended: 0, count: 0 };
+// App.setClassRef 注册的直播/点播回调类不同。JNI 缓存的 methodID 必须
+// 配合对应类的实例；仅实现 ITellMessage 的内存 DEX 对象并不足够。
+const playbackCallbacks = {
+  live: { className: 'com.wys.iptvgo.activity.TimeShiftPlayActivity', errorMethod: 'lambda$tellMessage$2$TimeShiftPlayActivity' },
+  vod: { className: 'com.newvod.activity.VodPlayActivity', errorMethod: 'lambda$tellMessage$1$VodPlayActivity' },
+};
+// 后台 Activity 没有初始化界面，原版错误提示与重播逻辑会操作空播放器。
+// 接管所有通知，再在主线程创建并长期保留与原生注册类匹配的回调实例。
 Java.perform(() => {
-  try {
-    const Activity = Java.use('com.newvod.activity.VodPlayActivity');
-    const tell = Activity.tellMessage.overload('int');
-    tell.implementation = function (code) {
-      send({ tell: code });
-    };
-    // 已排入 Activity 队列的原版错误 Runnable 也不能再操作未初始化的播放器。
+  for (const [kind, entry] of Object.entries(playbackCallbacks)) {
     try {
-      const errorUi = Activity['lambda$tellMessage$1$VodPlayActivity'].overload('java.lang.String');
-      errorUi.implementation = function (message) { send({ vodCallbackWarning: String(message) }); };
-    } catch (e) { send({ vodCallbackGuardError: '错误提示防护: ' + String(e) }); }
-    send({ vodCallbackGuard: true });
-  } catch (e) { send({ vodCallbackGuardError: String(e) }); }
+      const Activity = Java.use(entry.className);
+      Activity.tellMessage.overload('int').implementation = function (code) {
+        callbackState.last = code; callbackState.count++;
+        if (code === 2) callbackState.ended = 1;
+        send({ tell: code, playbackKind: kind });
+      };
+      // 防止此前已经排入队列的原版错误 Runnable 操作未初始化的播放器。
+      try {
+        Activity[entry.errorMethod].overload('java.lang.String').implementation = function (message) {
+          send({ playbackCallbackWarning: kind + ': ' + String(message) });
+        };
+      } catch (e) { send({ playbackCallbackWarning: kind + ' 错误提示防护: ' + String(e) }); }
+      entry.guarded = true;
+      send({ playbackCallbackGuard: kind });
+    } catch (e) { send({ playbackCallbackGuardError: kind + ': ' + String(e) }); }
+  }
 });
-
-// 直播仍使用内存 DEX 回调；点播必须使用 App 自己的 VodPlayActivity 回调。
-// Android 13 模拟器上，点播 P2P 到 endBlockID 时调用内存 DEX 回调会在
-// art::JNI::CallVoidMethodV 崩溃（两集 Silo 片尾均复现）。App 原生的
-// VodPlayActivity 的原生类可安全承接 JNI 回调；上面的 hook 再把后台实例
-// 的通知转给服务端，避免原版错误分支操作未初始化的界面播放器。
-// 两种回调都保留全局强引用，避免原生 P2P 线程稍后访问已回收的对象。
-const CB_DEX_B64 = 'ZGV4CjAzNQAokF7Yl7n+65r8YdNy7FuQ7GOXjYC2FmGcAwAAcAAAAHhWNBIAAAAAAAAAAPwCAAAOAAAAcAAAAAUAAACoAAAAAgAAALwAAAADAAAA1AAAAAQAAADsAAAAAQAAAAwBAABwAgAALAEAALIBAAC8AQAAxAEAAMcBAADcAQAA8QEAAAUCAAAUAgAAFwIAABsCAAAiAgAALQIAADMCAABAAgAAAgAAAAMAAAAEAAAABQAAAAcAAAAHAAAABAAAAAAAAAAIAAAABAAAAKwBAAABAAAACQAAAAEAAAAKAAAAAQAAAAsAAAABAAAAAAAAAAEAAAABAAAAAQABAAwAAAADAAAAAQAAAAEAAAABAAAAAwAAAKQBAAAGAAAAAAAAAN8CAAAAAAAAAQAAAAAAAACQAQAACAAAABIAZwACAGcAAQBnAAAADgABAAEAAQAAAJYBAAAEAAAAcBADAAAADgAEAAIAAAAAAJoBAAAOAAAAZwMCAGAAAAASEbAQZwAAABIgMwMEAGcBAQAOAAQADjwtAAMADgAIAQAOh1oAAAAAAQAAAAIAAAABAAAAAAAIPGNsaW5pdD4ABjxpbml0PgABSQATTGNvbS90eHR2L05hdGl2ZUNCOwATTGRuZXQvSVRlbGxNZXNzYWdlOwASTGphdmEvbGFuZy9PYmplY3Q7AA1OYXRpdmVDQi5qYXZhAAFWAAJWSQAFY291bnQACWVuZGVkRmxhZwAEbGFzdAALdGVsbE1lc3NhZ2UAnAF+fkQ4eyJiYWNrZW5kIjoiZGV4IiwiY29tcGlsYXRpb24tbW9kZSI6ImRlYnVnIiwiaGFzLWNoZWNrc3VtcyI6ZmFsc2UsIm1pbi1hcGkiOjIxLCJzaGEtMSI6ImZhY2VkZjQxYmJkMjhiNTYzZDFlOWUwOWM1ZjcyZDdjNWNhNTk4ZDUiLCJ2ZXJzaW9uIjoiOC4yLjItZGV2In0AAwACAQBJAUkBSQCIgASsAgGBgATMAgIB5AIAAAANAAAAAAAAAAEAAAAAAAAAAQAAAA4AAABwAAAAAgAAAAUAAACoAAAAAwAAAAIAAAC8AAAABAAAAAMAAADUAAAABQAAAAQAAADsAAAABgAAAAEAAAAMAQAAASAAAAMAAAAsAQAAAyAAAAMAAACQAQAAARAAAAIAAACkAQAAAiAAAA4AAACyAQAAACAAAAEAAADfAgAAABAAAAEAAAD8AgAA';
-let CB_INST = null, CB_NATIVE = null, CB_LOADER = null, CB_MODE = 'none', CB_FAIL = '';
-let VOD_CB = null, vodCbPending = null;
-function ensureVodCB() {
-  if (VOD_CB) return Promise.resolve(VOD_CB);
-  if (vodCbPending) return vodCbPending;
-  vodCbPending = new Promise((resolve, reject) => Java.perform(() => {
+function ensurePlaybackCB(kind) {
+  const entry = playbackCallbacks[kind];
+  if (entry.instance) return Promise.resolve(entry.instance);
+  if (entry.pending) return entry.pending;
+  entry.pending = new Promise((resolve, reject) => Java.perform(() => {
     Java.scheduleOnMainThread(() => {
       try {
-        const Activity = Java.use('com.newvod.activity.VodPlayActivity');
-        VOD_CB = Java.retain(Java.cast(Activity.$new(), Java.use('dnet.ITellMessage')));
-        resolve(VOD_CB);
-      } catch (e) {
-        vodCbPending = null;
-        reject(new Error('App 原生点播回调创建失败: ' + (e.stack || e)));
-      }
+        if (!entry.guarded) throw new Error('后台播放回调防护未就绪');
+        const Activity = Java.use(entry.className);
+        entry.instance = Java.retain(Java.cast(Activity.$new(), Java.use('dnet.ITellMessage')));
+        resolve(entry.instance);
+      } catch (e) { reject(new Error('App 原生播放回调创建失败: ' + (e.stack || e))); }
     });
-  }));
-  return vodCbPending;
-}
-function ensureCB() {
-  if (CB_INST) return CB_INST;
-  try {
-    const B64 = Java.use('android.util.Base64');
-    const BB = Java.use('java.nio.ByteBuffer');
-    const IMDCL = Java.use('dalvik.system.InMemoryDexClassLoader');   // 内存加载,不落盘=不受SELinux/权限限制
-    const bytes = B64.decode(CB_DEX_B64, 0);
-    CB_LOADER = IMDCL.$new(BB.wrap(bytes), Java.use('android.app.ActivityThread').currentApplication().getClassLoader());   // 全局保存:loader被回收会导致类卸载->原生持有的methodID失效
-    const f = Java.ClassFactory.get(CB_LOADER);    // 必须用指向该loader的factory:Java.use默认只查App的loader,找不到我们内存加载的类
-    CB_NATIVE = f.use('com.txtv.NativeCB');
-    // Java.retain = 建立**全局强引用(JNI global ref)**。原生 vodStart 会把这个回调对象存起来,
-    // 之后由P2P线程长期回调;若只是局部引用,调用返回后引用失效 -> 原生再回调即
-    // SIGSEGV(CallVoidMethodV, fault addr 0x0 空指针)。这正是"播几分钟后崩"的机制。
-    CB_INST = Java.retain(Java.cast(CB_NATIVE.$new(), Java.use('dnet.ITellMessage')));
-    CB_MODE = 'dex'; return CB_INST;
-  } catch (e) { CB_FAIL = '' + (e.message || e); throw new Error('安全回调加载失败: ' + CB_FAIL); }
+  })).catch(e => { entry.pending = null; throw e; });
+  return entry.pending;
 }
 
 function dumpList(listVal, ChannelCls) {
@@ -168,7 +151,7 @@ rpc.exports = {
     }));
   },
   vodPlay: function (channelId, ip, port, percent, mode) {
-    return ensureVodCB().then(cb => new Promise((resolve, reject) => Java.perform(function () {
+    return ensurePlaybackCB('vod').then(cb => new Promise((resolve, reject) => Java.perform(function () {
       let step='start';
       try {
         step='stopPrev'; const VC=Java.use('dnet.VideoClient'); try{VC.playbackStop();}catch(e){} try{VC.vodStop();}catch(e){}
@@ -179,16 +162,15 @@ rpc.exports = {
     })));
   },
   play: function (chid, startTime) {
-    return new Promise((resolve, reject) => Java.perform(function () {
+    return ensurePlaybackCB('live').then(cb => new Promise((resolve, reject) => Java.perform(function () {
       let step='start';
       try {
-        step='stopPrev'; try { Java.use('dnet.VideoClient').playbackStop(); } catch(e){}
-        step='cb'; const cb = ensureCB();   // 复用持久单例,不再每次 $new
+        step='stopPrev'; const VC=Java.use('dnet.VideoClient'); try{VC.playbackStop();}catch(e){} try{VC.vodStop();}catch(e){}
         step='playbackStart';
-        const port = Java.use('dnet.VideoClient').playbackStart(chid, (startTime|0), 2147483647, cb, 0);
-        resolve({ port: port, callback: CB_MODE });
+        const port = VC.playbackStart(chid, (startTime|0), 2147483647, cb, 0);
+        resolve({ port: port, callback: 'activity' });
       } catch(e){ reject('at['+step+']: '+(e&&(e.stack||e.message||e)||'unknown')); }
-    }));
+    })));
   },
   // —— 登录相关(网页UI登录,全后台,用户不碰模拟器)——
   loginState: function () {
@@ -242,16 +224,11 @@ rpc.exports = {
       resolve(out);
     }));
   },
-  // 轮询原生回调状态(替代从原生线程 send() 回JS:那条路径正是SIGSEGV来源)。reset=true 时清零,供每次播放开始前重置
+  // 保留诊断接口；直播、点播各自由 APK 注册的原生类承接。
   pollTell: function (reset) {
-    return new Promise((resolve) => Java.perform(function () {
-      try {
-        if (!CB_NATIVE) return resolve({ mode: CB_MODE, fail: CB_FAIL, last: 0, ended: 0, count: 0 });
-        const r = { mode: CB_MODE, fail: CB_FAIL, last: CB_NATIVE.last.value, ended: CB_NATIVE.endedFlag.value, count: CB_NATIVE.count.value };
-        if (reset) { CB_NATIVE.last.value = 0; CB_NATIVE.endedFlag.value = 0; CB_NATIVE.count.value = 0; }
-        resolve(r);
-      } catch (e) { resolve({ mode: CB_MODE, err: '' + (e.message || e) }); }
-    }));
+    const result = { mode: Object.values(playbackCallbacks).some(entry => entry.instance) ? 'activity' : 'none', ...callbackState };
+    if (reset) { callbackState.last = 0; callbackState.ended = 0; callbackState.count = 0; }
+    return result;
   },
   // 引擎真实就绪判据(原生:icChart挂表+icAuth授权成功后 activatedTime=毫秒时间戳;默认0/失败-1)。activatedTime>0 且频道已加载 才算引擎挂表+授权完成、可安全 vodStart。替代冷启动盲等12s——盲等常常还没授权就播,vodStart直接给死端口/-1000
   engineReady: function () {
