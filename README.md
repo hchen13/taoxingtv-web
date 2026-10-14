@@ -39,11 +39,12 @@ localhost:8090 (也支持 /TXTV/ 路径)
 
 ## 代理与直连
 
-服务器可以留在当前 Mac，局域网设备继续访问同一个 `:8090` 地址。视频 P2P 节点会动态变化，固定 IP 表无法覆盖所有节目。macOS 可选择只把本项目模拟器的外连绑定到物理网卡，无需修改 Clash；也可由用户在代理中按实际取流进程分流。配置方法、回退方式与已识别源地址见 [本机直连与视频源清单](docs/direct-network-and-sources.md)。
+服务器可以留在当前 Mac，局域网设备继续访问同一个 `:8090` 地址。macOS 默认自动识别正在联网的物理网卡，并将本项目模拟器的外连绑定到该出口；换一台 Mac 不需要填写 `en0` / `en1`，视频 P2P 节点变化也不依赖 IP 白名单。识别只读取网络状态，不修改 Clash、TUN、系统代理、DNS 或路由表。可运行 `node direct-network.js` 查看将选择的出口；支持手动指定和显式关闭。升级后需重启本项目模拟器才能生效，详见 [本机直连与视频源清单](docs/direct-network-and-sources.md)。
 
 ## 环境要求
 
 - **macOS(Apple Silicon 推荐)**、Node 18+、`ffmpeg`(`brew install ffmpeg`)
+- **Xcode Command Line Tools**：默认的 macOS 自动直连模式用系统 `clang` 编译本地网卡绑定模块。
 - **Android SDK + 模拟器**,一个 **ARM64 Android TV 系统镜像**(如 `system-images;android-33;android-tv;arm64-v8a`)
 - **已 root 的模拟器**(rootAVD + Magisk)+ 对应架构的 **frida-server**(arm64)
 - **你自己的淘星TV APK**(`com.wys.iptvgo`)+ 一个有效账号
