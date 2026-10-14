@@ -737,9 +737,10 @@ function setSide(collapsed){ APP.classList.toggle('collapsed',collapsed); $('sid
 function toggleSide(){ const c=!APP.classList.contains('collapsed'); setSide(c);
   if(layoutMode()==='desk' && !fsEl()){ try{localStorage.setItem('txtv_side',c?'1':'0')}catch(e){} } }   // 只有桌面常规模式记忆开合;抽屉(手机/全屏)按场景自动开合,不记忆
 try{ if(layoutMode()==='desk' && localStorage.getItem('txtv_side')==='1') setSide(true); }catch(e){}
-let activeStreamSid='', waitTimer=null, lastPlayedTime=0, pendingStartPaused=false, vodUserPaused=false;
+let activeStreamSid='', waitTimer=null, lastPlayedTime=0, pendingStartPaused=false, vodUserPaused=false, networkFailedSid='';
 function clearWaitTimer(){ if(waitTimer){ clearTimeout(waitTimer); waitTimer=null; } }
 function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
+  networkFailedSid='';
   playbackStoppedForDownload=false;
   const streamUrl=new URL(url,location.href); streamUrl.searchParams.set('sid',activeStreamSid); url=streamUrl.href;
   isLiveNow=isLive; livePauseStartedAt=0; window.curUrl=url; window.playTitle=title; streamStartedAt=Date.now(); userAction(); cancelRecovery(); clearWaitTimer(); lastPlayedTime=0; switching=true; setTimeout(()=>{switching=false;},3000); if(typeof wdStall!=='undefined'){wdStall=0;wdLast=0;}
@@ -770,6 +771,7 @@ function startPlay(title,url,isLive){ activeStreamSid=Date.now().toString(36)+Ma
   player.on(mpegts.Events.ERROR,(a,b)=>{ if(sid!==activeStreamSid) return; console.warn('mpegts error',a,b);
     if(!isLive && (b===mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED || b===mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED)){ if(fallbackToTranscode()) return; }
     if(a===mpegts.ErrorTypes.MEDIA_ERROR && b===mpegts.ErrorDetails.MEDIA_MSE_ERROR){ onMediaFailure(b); return; }
+    if(a===mpegts.ErrorTypes.NETWORK_ERROR){ onNetworkFailure(sid); return; }
     if(!switching) doRecover(); });
   if(pendingResumeAt){ resumeLastBuf=0; resumeLastGrow=Date.now(); resumeLastReady=0; resumeReadyGrow=Date.now(); resumeLastCheck=0; try{V.pause();}catch(e){} }   // 恢复等待:先不播,等缓冲越过中断处+攒够余量(见上面的等待器)
   else V.play().catch(()=>{});
@@ -961,6 +963,14 @@ function resumeMargin(target){ return vodDur ? Math.min(RESUME_MARGIN,Math.max(0
 function atEnd(){ if(!curFilm) return;   // 内容真结束:有下一集就自动切,否则显示播放结束
   if(curEpIdx<curEps.length-1){ curEpIdx++; playEpisode(resumePctFor(curFilm.playid,curEpIdx)); }
   else { $('loadtx').textContent='播放结束'; $('load').classList.add('show'); STAGE.classList.add('ui'); if(player){try{player.destroy()}catch(e){}player=null;} } }
+function onNetworkFailure(sid){
+  if(sid!==activeStreamSid) return;
+  networkFailedSid=sid;
+  // HTTP 断开不影响已经解码的 MSE 缓冲。先继续播放，临近用尽再恢复，
+  // 暂停时也保留缓存；真正的解码错误仍立即走 onMediaFailure。
+  if(!isLiveNow && !pendingResumeAt && !V.error && (vodUserPaused || bufferedEndAt(V.currentTime)-V.currentTime>6)) return;
+  if(!switching) doRecover();
+}
 function doRecover(){   // 断流/解码错误:先从当前位置重取续播;只有确认真到片尾才跳下一集(不再一到90%就跳)
   if(recovering||!player) return;
   if(isLiveNow&&livePauseStartedAt) return;   // 真正的用户暂停留到手动续播；断流的自动 pause 不记作用户暂停。
@@ -993,7 +1003,7 @@ let failedMediaSid='', failedMediaChannel='', failedMediaAt=0, failedMediaCount=
 function onMediaFailure(detail){
   if(failedMediaSid===activeStreamSid) return; failedMediaSid=activeStreamSid;
   const err=V.error, now=Date.now(), badDecode=(err&&err.code===3)||detail===mpegts.ErrorDetails.MEDIA_MSE_ERROR;
-  console.warn('媒体故障', {detail,code:err&&err.code,message:err&&err.message,position:vodBase+V.currentTime,bufferedAhead:Math.max(0,bufferedEndAt(V.currentTime)-V.currentTime)});
+  console.warn('媒体故障 '+JSON.stringify({at:new Date().toISOString(),detail,code:err&&err.code,message:err&&err.message,position:vodBase+V.currentTime,bufferedAhead:Math.max(0,bufferedEndAt(V.currentTime)-V.currentTime)}));
   if(!isLiveNow && badDecode){
     if(failedMediaChannel!==curId || now-failedMediaAt>10*60*1000) failedMediaCount=0;
     failedMediaChannel=curId; failedMediaAt=now; failedMediaCount++;
@@ -1136,6 +1146,9 @@ setInterval(async ()=>{ if(player && !isLiveNow && curFilm){   // 暂停时也�
   fetch('api/buf?sid='+activeStreamSid+'&d='+a.toFixed(1)+'&p='+(V.paused&&!pendingResumeAt?'1':'0')+'&pos='+reportPos.toFixed(1)).catch(()=>{});   // 预缓冲中的暂停不算用户主动暂停；位置用来限制已送出但尚未追加到 MSE 的数据
   // 恢复无缝的关键——纯缓冲驱动决定重连时机:缓冲快见底(<6s)才查源在不在供数;源真断了就从当前位置重连。暂停时服务端持续填库和探测。
   if(a >= 6) dryStart=0;   // 缓冲回来了,清空"干涸"计时
+  if(networkFailedSid===activeStreamSid && a<6 && !V.paused && !pendingResumeAt && !recovering && !switching){
+    dryStart=0; doRecover(); return; // HTTP 已失败，不依赖可能同样离线的状态接口。
+  }
   if(a < 6 && !V.paused && !pendingResumeAt && !recovering && !switching && !drainChecking){ drainChecking=true;   // 暂停时不做见底判断(不消耗缓冲,也不该重取)
     try{ const st=await jget('api/streamstate');
       if(!st.alive){ dryStart=0;

@@ -4,7 +4,8 @@ const http = require('http');
 const fs = require('fs');
 const pathMod = require('path');
 const crypto = require('crypto');
-const { execFileSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
+const { createAdbClient } = require('./adb-client');
 const { XMLParser } = require('fast-xml-parser');
 const { pinyin } = require('pinyin-pro');
 const { DownloadQueue } = require('./download-queue');
@@ -29,10 +30,10 @@ const FRIDA_BIN = '/data/local/tmp/frida-server';
 const VOD_BUFFER_MB = Math.max(0, Math.min(1024, Number(process.env.VOD_BUFFER_MB ?? 256) || 0));
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function adb(args, opts={}) { try { return execFileSync(ADB, args, {encoding:'utf8', timeout: opts.timeout||15000}); } catch(e){ return ''; } }
+const adb = createAdbClient(ADB);
 function adbSu(cmd) { return adb(['shell','su','-c',cmd]); }
-function readDevFile(dev){
-  try { const b64 = execFileSync(ADB, ['exec-out','su','-c','base64 "'+dev+'" 2>/dev/null'], {encoding:'utf8', maxBuffer:64*1024*1024, timeout:15000});
+async function readDevFile(dev){
+  try { const b64 = await adb(['exec-out','su','-c','base64 "'+dev+'" 2>/dev/null'], {maxBuffer:64*1024*1024});
     const buf = Buffer.from(b64.replace(/\s/g,''), 'base64'); return buf.length>0 ? buf : null;
   } catch(e){ return null; }
 }
@@ -85,11 +86,12 @@ let curBuf=0, curPaused=false, curBufAt=0, curPosAbs=0;  // 当前播放会话�
 let lastActivity=Date.now();
 let activeLogins=0;
 
-function emulatorRunning(){ return /emulator-\d+\s+device/.test(adb(['devices'])); }
+async function emulatorRunning(){ return /emulator-\d+\s+device/.test(await adb(['devices'])); }
 async function waitBootCompleted(timeoutMs=90000){ const t0=Date.now();
-  while(Date.now()-t0<timeoutMs){ if(adb(['shell','getprop','sys.boot_completed']).trim()==='1')return true; await sleep(2000); } return false; }
-function fridaServerUp(){ return /frida-server/.test(adbSu('pgrep -l frida-server || true')); }
-function appRunning(){ return adb(['shell','pidof',PKG]).trim().length>0; }
+  while(Date.now()-t0<timeoutMs){ if((await adb(['shell','getprop','sys.boot_completed'])).trim()==='1')return; await sleep(1000); }
+  throw new Error('Android 启动超时'); }
+async function fridaServerUp(){ return /frida-server/.test(await adbSu('pgrep -l frida-server || true')); }
+async function appRunning(){ return (await adb(['shell','pidof',PKG])).trim().length>0; }
 
 // 停原生 P2P 会话(vodStop)必须防"晚到":stop 串进 streamMutex 队列时,队列里可能已排着新流的启动任务,
 // 于是 stop 在新流刚接通、刚出数据时才执行 -> 停掉的是**新**会话 -> 源把在途的几 MB 吐完就关连接。
@@ -113,28 +115,39 @@ function shouldRestartAfterDeadPort(count, nearEndVod){
   return deadPortRestartPolicy.shouldRestart(count,{nearEnd:nearEndVod,startupWarmup:startupWarmup()});
 }
 async function bootEmulator(){
-  if(state==='ready' && script && emulatorRunning()) return;
   if(bootPromise) return bootPromise;
+  if(state==='ready' && script) return;
   bootPromise=(async()=>{ state='booting';
+    const bootStarted=Date.now();
+    const step=(message)=>{ bootStep=message; console.log('[engine] '+message+' +'+(Date.now()-bootStarted)+'ms'); };
     try {
-      if(!emulatorRunning()){ bootStep='启动模拟器(全新冷启动)…';
-        const p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:'ignore',env:emulatorNetworkEnv()});
-        await new Promise((resolve,reject)=>{ p.once('spawn',resolve); p.once('error',reject); });
+      if(!await emulatorRunning()){ step('启动模拟器(全新冷启动)…');
+        const logPath=pathMod.join(__dirname,'cache','emulator.log');
+        fs.mkdirSync(pathMod.dirname(logPath),{recursive:true});
+        if(fs.existsSync(logPath)) fs.renameSync(logPath,logPath+'.previous');
+        const env=emulatorNetworkEnv(), logFd=fs.openSync(logPath,'a',0o600);
+        let p;
+        try{
+          p=spawn(EMULATOR,['-avd',AVD,'-no-window','-no-audio','-no-boot-anim','-gpu','swiftshader_indirect','-no-metrics','-no-snapshot'],{detached:true,stdio:['ignore',logFd,logFd],env});
+          await new Promise((resolve,reject)=>{ p.once('spawn',resolve); p.once('error',reject); });
+        }finally{ fs.closeSync(logFd); }
+        p.on('exit',(code,signal)=>console.error('[engine] 模拟器退出 pid='+p.pid+' code='+code+' signal='+signal+'；诊断见 cache/emulator.log'));
         p.unref();   // -no-snapshot:每次全新冷启动,不加载/保存快照,不继承上次残留状态(登录仍在磁盘userdata里,会自动登录)
-        adb(['wait-for-device'],{timeout:120000}); }
-      bootStep='等待系统就绪…'; await waitBootCompleted();
-      bootStep='启动取流引擎…'; if(!fridaServerUp()){ adbSu('nohup '+FRIDA_BIN+' >/dev/null 2>&1 &'); await sleep(1500); }
-      if(needColdRestart){ bootStep='冷重启应用…'; adb(['shell','am','force-stop',PKG]); await sleep(2000); needColdRestart=false; }
+        await adb(['wait-for-device'],{timeout:120000,required:true});
+        needColdRestart=false; } // 新模拟器已是冷启动，不再额外 force-stop / 等两秒。
+      step('等待系统就绪…'); await waitBootCompleted();
+      step('启动取流引擎…'); if(!await fridaServerUp()){ await adbSu('nohup '+FRIDA_BIN+' >/dev/null 2>&1 &'); await sleep(1500); }
+      if(needColdRestart){ step('冷重启应用…'); await adb(['shell','am','force-stop',PKG]); await sleep(2000); needColdRestart=false; }
       let coldLaunch=false;
-      if(!appRunning()){
-        adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']);
+      if(!await appRunning()){
+        await adb(['shell','monkey','-p',PKG,'-c','android.intent.category.LEANBACK_LAUNCHER','1']);
         // 部分模拟器上 monkey 找不到 Leanback 入口并以 -5 退出；显式启动 APK 的登录入口。
-        if(!appRunning()) adb(['shell','am','start','-n',PKG+'/.activity.LoginActivity']);
+        if(!await appRunning()) await adb(['shell','am','start','-n',PKG+'/.activity.LoginActivity']);
         coldLaunch=true; coldLaunchAt=Date.now(); coldStreamStarted=false;
       }
-      for(let i=0;i<30 && !appRunning();i++) await sleep(1000);
-      if(coldLaunch){ bootStep='等待应用启动…'; await sleep(1500); }
-      bootStep='注入引擎…'; await attach();
+      for(let i=0;i<30 && !await appRunning();i++) await sleep(1000);
+      if(coldLaunch){ step('等待应用启动…'); await sleep(1500); }
+      step('注入引擎…'); await attach();
       let login=await script.exports.loginState();
       if(!login.account && fs.existsSync(CREDS_FILE)){
         bootStep='等待应用自动登录…';
@@ -169,7 +182,7 @@ async function bootEmulator(){
           if(!rdy.activated) throw new Error(a.auth===3?'设备授权超时（淘星返回码 3）':'设备授权失败（返回码 '+a.auth+(a.err?'，'+a.err:'')+'）');
         }
       }
-      state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
+      state='ready'; bootStep='就绪'; lastActivity=Date.now(); console.log('[engine] ready '+(Date.now()-bootStarted)+'ms');   // 刚就绪即重置空闲计时:否则慢冷启动后 lastActivity 已过期,引擎会被空闲定时器立刻回收,导致随后 login/channels 请求 503(刷新加载不出节目的真凶)
     } catch(e){ state='off'; await detachAgent(); session=null; script=null;
       bootStep='启动失败: '+(e.message||e); console.error('[engine] boot failed',e); throw e; }
     finally { bootPromise=null; }
@@ -184,15 +197,22 @@ async function attach(){
   const dev=await frida.getUsbDevice(); let app=null;
   for(let i=0;i<40;i++){ const apps=await dev.enumerateApplications(); app=apps.find(a=>a.identifier===PKG&&a.pid>0); if(app)break; await sleep(1000); }   // 崩溃冷重启后App启动可能>20s,放宽到40s避免"应用未就位"导致彻底断
   if(!app) throw new Error('应用未就位');
-  session=await dev.attach(app.pid);
-  session.detached.connect((reason)=>{
+  const attachedSession=await dev.attach(app.pid); session=attachedSession;
+  attachedSession.detached.connect((reason)=>{
+    if(session!==attachedSession) return; // 迟到的旧会话退出不能清掉刚连接好的新引擎。
     // 片尾源先断、原生 App 随后崩溃时，onSegEnd 正在续接。保留 HTTP 响应和已缓冲的视频，
     // 让续接流程冷启动引擎继续核对后续内容；直接 cleanup 会把断流伪装成已播完。
     if((current.splicing || current.buffer) && current.res && !current.res.writableEnded) console.log('[engine] 原生会话退出，保留点播续接与客户端缓冲');
     else cleanupCurrent();
     script=null; session=null;
-    if(state==='ready'){ state='off'; needColdRestart=true; console.log('[engine] session dropped ('+reason+') -> off; 下次冷重启app修复P2P核心'); } });
-  script=await session.createScript(fs.readFileSync(__dirname+'/agent.js','utf8'));
+    if(state==='ready'){
+      state='off'; needColdRestart=true; console.log('[engine] session dropped ('+reason+') -> off');
+      // 磁盘缓存满时 ffmpeg 的 close 要等 stdout 排空；不能等缓存见底才冷启动。
+      // 这里只预热引擎，续接仍由持有 token 的 onSegEnd 发起，绝不抢新节目的流。
+      if(current.buffer && current.res && !current.res.writableEnded)
+        bootEmulator().catch(e=>console.error('[engine] 后台恢复失败:',e.message));
+    } });
+  script=await attachedSession.createScript(fs.readFileSync(__dirname+'/agent.js','utf8'));
   // 捕获原生播放回调 tellMessage:i==2=真结束(片尾);其他为错误码
   script.message.connect(m=>{
     if(m.type==='error'){ console.error('[agent]',m.description); return; }
@@ -207,12 +227,12 @@ async function attach(){
   });
   await script.load(); console.log('[frida] attached pid',app.pid);
 }
-async function ensureReady(){ lastActivity=Date.now(); if(state==='ready'&&script&&emulatorRunning())return; await bootEmulator(); }
+async function ensureReady(){ lastActivity=Date.now(); if(state==='ready'&&script)return; await bootEmulator(); }
 async function shutdownEmulator(reason){ if(state==='off')return; state='off'; console.log('[engine] shutting down:',reason);
   cleanupCurrent();
   await detachAgent(); script=null; session=null;
-  adb(['emu','kill']);
-  for(let i=0;i<20 && emulatorRunning();i++){ await sleep(500); }  // 等模拟器真正退出,避免重启时新进程撞上正在死亡的模拟器
+  await adb(['emu','kill']);
+  for(let i=0;i<20 && await emulatorRunning();i++){ await sleep(500); }  // 等模拟器真正退出,避免重启时新进程撞上正在死亡的模拟器
   bootStep=''; console.log('[engine] off (内存已释放)'); }
 // —— 诊断采样(排查频繁短缓冲):需要时用 DIAG=1 打开 ——
 if(process.env.DIAG==='1'){ let _lastOut=0, _lastT=Date.now();
@@ -284,7 +304,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
           await sleep(800); continue;
         }
         const port=r.port;
-        adb(['forward','tcp:'+port,'tcp:'+port]);
+        await adb(['forward','tcp:'+port,'tcp:'+port],{required:true});
         let cand=null, gotData=false, engineLost=false;
         // 同一端口最多就地重开3次:刚 vodStart 到新位置时P2P往往还没下载够,读到尽头会被当成EOF。
         // 就地重开 ffmpeg 不碰原生会话(零churn),等几秒让P2P追上来,比"拆掉整路重来"便宜得多也稳得多
@@ -303,7 +323,7 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         clearTimeout(timer);
         clearInterval(watch);
         cand.stdout.removeListener('data', onFirst); cand.removeListener('exit', onCandExit);
-        if(engineLost){ try{cand.kill('SIGKILL');}catch(e){} adb(['forward','--remove','tcp:'+port]); throw new Error('取流引擎崩溃，正在重新连接'); }
+        if(engineLost){ try{cand.kill('SIGKILL');}catch(e){} await adb(['forward','--remove','tcp:'+port]); throw new Error('取流引擎崩溃，正在重新连接'); }
         if(gotData && !aborted){
           console.log('['+label+'] 首包到达 总计 '+(Date.now()-requestedAt)+'ms,本次取流 '+(Date.now()-playStarted)+'ms');
           cand.stdout.removeListener('data', collect);
@@ -318,14 +338,14 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
         deadPortCount++;
         console.log('['+label+'] 端口'+port+' 同端口重开3次仍无数据 -> 重新取流 '+attempt+'/'+maxStartTries);
         try{ if(script) await script.exports.stop(); }catch(e){}   // await:同上,防止晚到的stop杀掉下一次重取
-        adb(['forward','--remove','tcp:'+port]);
+        await adb(['forward','--remove','tcp:'+port]);
         await sleep(800);
       }
 
       if(aborted || res.writableEnded || req.destroyed){   // 客户端在启动期就走了(seek/切集时前端换流走的正是这条)
         if(ff){ try{ff.kill('SIGKILL');}catch(e){} }
         try{ if(script) await script.exports.stop(); }catch(e){}   // 必须await:否则这个stop会晚到,把用户下一次seek刚起的流停掉(端口有效却无数据)
-        if(myPort) adb(['forward','--remove','tcp:'+myPort]);
+        if(myPort) await adb(['forward','--remove','tcp:'+myPort]);
         current={token:myToken, chid:null, port:null, ff:null, ended:false, ffExited:false, starting:false, sid:null};
         // 前端等不及先走了,但本次确实遇到过死端口=引擎已坏。必须在这里也自愈,否则前端反复重试、
         // 每次都走abort分支跳过自愈 -> 引擎一直毒着 -> 用户看到"播放中断"。正常seek不会有死端口,不会误触发
@@ -462,8 +482,9 @@ function serveStream(req, res, playFn, label, isLive, nearEndVod, vod){
               if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
               const r = await vod.mkPlay(pct);
               if(!r || !r.port || r.port<=0) throw new Error('续接取流失败 port='+(r&&r.port));
-              adb(['forward','tcp:'+r.port,'tcp:'+r.port]);
-              if(myPort && myPort!==r.port) adb(['forward','--remove','tcp:'+myPort]);
+              await adb(['forward','tcp:'+r.port,'tcp:'+r.port],{required:true});
+              if(myPort && myPort!==r.port) await adb(['forward','--remove','tcp:'+myPort]);
+              if(res.writableEnded || req.destroyed || current.token!==myToken){ finished=true; return; }
               myPort = r.port;
               // 新端口可能还在等 P2P 下载。同一原生会话重开一次 ffmpeg，避免无谓的 vodStop/vodStart。
               for(let sub=1; sub<=2 && !finished; sub++){
@@ -618,7 +639,7 @@ app.post('/api/login', async (req,res)=>{
       try { st = await script.exports.loginState(); } catch(e){}
       if (st.activated) break;
       // 原生应用会依次尝试六条线路；等它给出最终结果，避免网页先报登录失败。
-      if (i%3===0 && /topResumedActivity=.*com\.wys\.iptvgo\/\.activity\.RescueActivity/.test(adb(['shell','dumpsys','activity','activities']))) break;
+      if (i%3===0 && /topResumedActivity=.*com\.wys\.iptvgo\/\.activity\.RescueActivity/.test(await adb(['shell','dumpsys','activity','activities']))) break;
       await sleep(2000);
     }
     if (st.activated) {
@@ -935,7 +956,7 @@ async function fetchPoster(pic, local, key, ext){
   const pr=(async()=>{ await ensureReady();
     const dev='/data/data/'+PKG+'/files/txtvp_'+key+ext;
     const r=pic.startsWith('old:') ? await script.exports.dlPosterOld(pic.slice(4),dev) : await script.exports.dlPoster(pic,dev);
-    if(r&&r.ret===0){ const buf=readDevFile(dev); if(buf&&buf.length>100) fs.writeFileSync(local,buf); try{execFileSync(ADB,['shell','su','-c','rm -f "'+dev+'"']);}catch(e){} }
+    if(r&&r.ret===0){ const buf=await readDevFile(dev); if(buf&&buf.length>100) fs.writeFileSync(local,buf); await adbSu('rm -f "'+dev+'"'); }
   })().catch(e=>console.error('[poster]',e&&e.message)).finally(()=>posterInflight.delete(key));
   posterInflight.set(key,pr); return pr;
 }
@@ -955,7 +976,7 @@ app.get('/logo', async (req,res)=>{
   const local=pathMod.join(LOGO_DIR,link+'.png');
   const serve=()=>{ res.setHeader('Cache-Control','public, max-age=604800'); res.sendFile(local); };
   if(fs.existsSync(local)) return serve();
-  try { await ensureReady(); const dev='/data/data/'+PKG+'/files/icon/'+link+'.png'; const buf=readDevFile(dev);
+  try { await ensureReady(); const dev='/data/data/'+PKG+'/files/icon/'+link+'.png'; const buf=await readDevFile(dev);
     if(buf&&buf.length>100&&buf[0]===0x89&&buf[1]===0x50){ fs.writeFileSync(local,buf); return serve(); }
   } catch(e){}
   res.status(404).end();
